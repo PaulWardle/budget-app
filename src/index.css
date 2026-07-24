@@ -1,0 +1,74 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+  --color-bg: var(--app-bg);
+  --color-surface: var(--app-surface);
+  --color-surface-2: var(--app-surface-2);
+  --color-border: var(--app-border);
+  --color-ink: var(--app-ink);
+  --color-ink-muted: var(--app-ink-muted);
+  --color-ink-faint: var(--app-ink-faint);
+  --color-accent: var(--app-accent);
+  --color-accent-ink: var(--app-accent-ink);
+  --color-good: var(--app-good);
+  --color-warn: var(--app-warn);
+  --color-bad: var(--app-bad);
+}
+
+:root {
+  --app-bg: #f6f7f9;
+  --app-surface: #ffffff;
+  --app-surface-2: #eef0f3;
+  --app-border: #dfe3e8;
+  --app-ink: #12161d;
+  --app-ink-muted: #4b5563;
+  --app-ink-faint: #8a94a1;
+  --app-accent: #2557d6;
+  --app-accent-ink: #ffffff;
+  --app-good: #157f3d;
+  --app-warn: #b45309;
+  --app-bad: #b91c1c;
+}
+
+.dark {
+  --app-bg: #0b0f17;
+  --app-surface: #121826;
+  --app-surface-2: #1a2233;
+  --app-border: #232d40;
+  --app-ink: #e8ecf3;
+  --app-ink-muted: #9aa6b8;
+  --app-ink-faint: #5d6a80;
+  --app-accent: #4f7df9;
+  --app-accent-ink: #ffffff;
+  --app-good: #34c471;
+  --app-warn: #f0a13c;
+  --app-bad: #f4655f;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--app-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'tnum';
+}
+
+/* Tabular figures everywhere money appears */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--app-accent) 30%, transparent);
+}

@@ -1,0 +1,874 @@
+// Typed data access. All mutations that matter financially also write an
+// audit_events row; account balance history is captured by a DB trigger.
+import { supabase } from '@/lib/supabase'
+import { todayIso } from '@/lib/format'
+import { computeNetWorth, type NetWorthItem } from '@/lib/engine/networth'
+import {
+  LIABILITY_ACCOUNT_TYPES,
+  LIQUID_ACCOUNT_TYPES,
+  type Account,
+  type AuditEvent,
+  type BalanceSnapshot,
+  type Budget,
+  type BudgetLine,
+  type Category,
+  type CategorisationRule,
+  type ChatConversation,
+  type ChatMessage,
+  type DebtPayment,
+  type DocumentRow,
+  type FinancialFact,
+  type ImportBatch,
+  type ImportedItem,
+  type Insight,
+  type Liability,
+  type LoanScheduleRow,
+  type Merchant,
+  type MerchantAlias,
+  type NetWorthSnapshot,
+  type RecurringPayment,
+  type SavingsGoal,
+  type Transaction,
+} from '@/types/domain'
+
+function throwIf(error: { message: string } | null): void {
+  if (error) throw new Error(error.message)
+}
+
+export async function recordAudit(input: {
+  userId: string
+  recordType: string
+  recordId?: string | null
+  action: AuditEvent['action']
+  previous?: unknown
+  next?: unknown
+  source?: string
+  undoable?: boolean
+  importBatchId?: string | null
+}): Promise<void> {
+  const { error } = await supabase.from('audit_events').insert({
+    user_id: input.userId,
+    record_type: input.recordType,
+    record_id: input.recordId ?? null,
+    action: input.action,
+    previous_value: input.previous ?? null,
+    new_value: input.next ?? null,
+    source: input.source ?? 'manual',
+    import_batch_id: input.importBatchId ?? null,
+    undo_status: input.undoable ? 'undoable' : 'not_undoable',
+  })
+  if (error) console.error('audit write failed') // never block the user action
+}
+
+// ------------------------------------------------------------------ accounts
+export async function fetchAccounts(): Promise<Account[]> {
+  const { data, error } = await supabase
+    .from('accounts')
+    .select('*')
+    .is('archived_at', null)
+    .order('sort')
+    .order('created_at')
+  throwIf(error)
+  return (data ?? []) as Account[]
+}
+
+export function accountClass(a: Account): 'asset' | 'liability' {
+  return LIABILITY_ACCOUNT_TYPES.includes(a.account_type) ? 'liability' : 'asset'
+}
+
+export function toNetWorthItem(a: Account): NetWorthItem {
+  return {
+    id: a.id,
+    name: a.name,
+    class: accountClass(a),
+    balanceMinor:
+      accountClass(a) === 'liability' ? Math.abs(a.balance_minor) : a.balance_minor,
+    isLiquid: a.is_liquid && LIQUID_ACCOUNT_TYPES.includes(a.account_type),
+    includeInNetWorth: a.include_in_net_worth,
+  }
+}
+
+export async function createAccount(
+  userId: string,
+  input: Partial<Account> & { name: string; account_type: Account['account_type'] },
+): Promise<Account> {
+  const { data, error } = await supabase
+    .from('accounts')
+    .insert({ ...input, user_id: userId })
+    .select()
+    .single()
+  throwIf(error)
+  await recordAudit({ userId, recordType: 'account', recordId: data!.id, action: 'insert', next: input })
+  await writeNetWorthSnapshot(userId)
+  return data as Account
+}
+
+export async function updateAccount(
+  userId: string,
+  id: string,
+  patch: Partial<Account>,
+  source: 'manual' | 'import' | 'ai_chat' | 'calculated' = 'manual',
+): Promise<Account> {
+  const { data: prev } = await supabase.from('accounts').select('*').eq('id', id).single()
+  const { data, error } = await supabase
+    .from('accounts')
+    .update({ ...patch, ...(patch.balance_minor !== undefined ? { balance_source: source } : {}) })
+    .eq('id', id)
+    .select()
+    .single()
+  throwIf(error)
+  await recordAudit({
+    userId,
+    recordType: 'account',
+    recordId: id,
+    action: 'update',
+    previous: prev,
+    next: patch,
+    source,
+    undoable: patch.balance_minor !== undefined,
+  })
+  if (patch.balance_minor !== undefined || patch.include_in_net_worth !== undefined) {
+    await writeNetWorthSnapshot(userId)
+  }
+  return data as Account
+}
+
+export async function fetchBalanceHistory(accountId: string): Promise<BalanceSnapshot[]> {
+  const { data, error } = await supabase
+    .from('account_balance_snapshots')
+    .select('*')
+    .eq('account_id', accountId)
+    .order('recorded_at', { ascending: false })
+    .limit(200)
+  throwIf(error)
+  return (data ?? []) as BalanceSnapshot[]
+}
+
+// ------------------------------------------------------------ net worth
+export async function writeNetWorthSnapshot(userId: string): Promise<void> {
+  const [accounts, liabilities] = await Promise.all([fetchAccounts(), fetchLiabilities()])
+  const items = buildNetWorthItems(accounts, liabilities)
+  const r = computeNetWorth(items)
+  await supabase.from('net_worth_snapshots').upsert(
+    {
+      user_id: userId,
+      date: todayIso(),
+      assets_minor: r.assetsMinor,
+      liabilities_minor: r.liabilitiesMinor,
+      net_worth_minor: r.netWorthMinor,
+      liquid_assets_minor: r.liquidAssetsMinor,
+      liquid_liabilities_minor: r.liquidLiabilitiesMinor,
+      breakdown: Object.fromEntries(items.map((i) => [i.name, i.balanceMinor * (i.class === 'liability' ? -1 : 1)])),
+    },
+    { onConflict: 'user_id,date' },
+  )
+}
+
+/** Liabilities tracked in `liabilities` win over their linked account rows to
+ * avoid double counting; unlinked liability-type accounts still count. */
+export function buildNetWorthItems(accounts: Account[], liabilities: Liability[]): NetWorthItem[] {
+  const linkedAccountIds = new Set(liabilities.filter((l) => l.account_id).map((l) => l.account_id))
+  const items: NetWorthItem[] = accounts
+    .filter((a) => !linkedAccountIds.has(a.id))
+    .map(toNetWorthItem)
+  for (const l of liabilities) {
+    if (l.status !== 'active') continue
+    items.push({
+      id: `liability:${l.id}`,
+      name: l.name,
+      class: 'liability',
+      balanceMinor: Math.abs(l.current_balance_minor),
+      isLiquid: l.liability_type === 'credit_card' || l.liability_type === 'paypal_credit',
+      includeInNetWorth: true,
+    })
+  }
+  return items
+}
+
+export async function fetchNetWorthHistory(): Promise<NetWorthSnapshot[]> {
+  const { data, error } = await supabase
+    .from('net_worth_snapshots')
+    .select('*')
+    .order('date')
+  throwIf(error)
+  return (data ?? []) as NetWorthSnapshot[]
+}
+
+// ---------------------------------------------------------------- categories
+export async function fetchCategories(): Promise<Category[]> {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('*')
+    .eq('is_archived', false)
+    .order('sort')
+  throwIf(error)
+  return (data ?? []) as Category[]
+}
+
+export async function fetchMerchants(): Promise<Merchant[]> {
+  const { data, error } = await supabase.from('merchants').select('*').order('name')
+  throwIf(error)
+  return (data ?? []) as Merchant[]
+}
+
+export async function fetchAliases(): Promise<MerchantAlias[]> {
+  const { data, error } = await supabase.from('merchant_aliases').select('*')
+  throwIf(error)
+  return (data ?? []) as MerchantAlias[]
+}
+
+export async function fetchRules(): Promise<CategorisationRule[]> {
+  const { data, error } = await supabase
+    .from('categorisation_rules')
+    .select('*')
+    .eq('is_active', true)
+    .order('priority')
+  throwIf(error)
+  return (data ?? []) as CategorisationRule[]
+}
+
+/** Apply learned rules to a raw bank description. */
+export function applyRules(
+  description: string,
+  rules: CategorisationRule[],
+): { merchantId: string | null; categoryId: string | null } | null {
+  const hay = description.toUpperCase()
+  for (const r of rules) {
+    const needle = r.matcher.toUpperCase()
+    const hit =
+      r.match_type === 'exact'
+        ? hay === needle
+        : r.match_type === 'starts_with'
+          ? hay.startsWith(needle)
+          : hay.includes(needle)
+    if (hit) return { merchantId: r.merchant_id, categoryId: r.category_id }
+  }
+  return null
+}
+
+/** Create/find a merchant, alias, rule and optional recurring flag in one go —
+ * the "Voy is my monthly TRT" learning primitive. Returns undo information. */
+export async function learnMerchant(
+  userId: string,
+  input: {
+    merchantName: string
+    aliasPatterns: string[]
+    categoryId: string | null
+    source?: 'manual' | 'ai_chat' | 'import_confirmation'
+    applyToPast?: boolean
+  },
+): Promise<{ merchant: Merchant; ruleIds: string[]; updatedPastCount: number }> {
+  const source = input.source ?? 'manual'
+  const { data: existing } = await supabase
+    .from('merchants')
+    .select('*')
+    .ilike('name', input.merchantName)
+    .maybeSingle()
+  let merchant = existing as Merchant | null
+  if (!merchant) {
+    const { data, error } = await supabase
+      .from('merchants')
+      .insert({ user_id: userId, name: input.merchantName, default_category_id: input.categoryId })
+      .select()
+      .single()
+    throwIf(error)
+    merchant = data as Merchant
+  } else if (input.categoryId) {
+    await supabase.from('merchants').update({ default_category_id: input.categoryId }).eq('id', merchant.id)
+  }
+
+  const ruleIds: string[] = []
+  for (const pattern of input.aliasPatterns) {
+    await supabase
+      .from('merchant_aliases')
+      .upsert({ user_id: userId, merchant_id: merchant.id, alias: pattern.toUpperCase() }, { onConflict: 'user_id,alias' })
+    const { data: rule, error } = await supabase
+      .from('categorisation_rules')
+      .insert({
+        user_id: userId,
+        matcher: pattern.toUpperCase(),
+        match_type: 'contains',
+        merchant_id: merchant.id,
+        category_id: input.categoryId,
+        source,
+      })
+      .select()
+      .single()
+    throwIf(error)
+    ruleIds.push((rule as CategorisationRule).id)
+  }
+
+  let updatedPastCount = 0
+  if (input.applyToPast) {
+    for (const pattern of input.aliasPatterns) {
+      const { data: updated } = await supabase
+        .from('transactions')
+        .update({ merchant_id: merchant.id, merchant_name: merchant.name, category_id: input.categoryId })
+        .ilike('description', `%${pattern}%`)
+        .is('category_id', null)
+        .select('id')
+      updatedPastCount += updated?.length ?? 0
+    }
+  }
+
+  await recordAudit({
+    userId,
+    recordType: 'categorisation_rule',
+    recordId: ruleIds[0] ?? merchant.id,
+    action: 'insert',
+    next: input,
+    source: source === 'manual' ? 'manual' : 'ai_chat',
+    undoable: true,
+  })
+  return { merchant, ruleIds, updatedPastCount }
+}
+
+// -------------------------------------------------------------- transactions
+export interface TxnFilters {
+  accountId?: string
+  categoryId?: string
+  merchantId?: string
+  search?: string
+  from?: string
+  to?: string
+  minAmountMinor?: number
+  maxAmountMinor?: number
+  uncategorised?: boolean
+  needsReview?: boolean
+  importBatchId?: string
+  recurringOnly?: boolean
+  limit?: number
+}
+
+export async function fetchTransactions(filters: TxnFilters = {}): Promise<Transaction[]> {
+  let q = supabase
+    .from('transactions')
+    .select('*, transaction_splits(*)')
+    .order('date', { ascending: false })
+    .order('created_at', { ascending: false })
+    .limit(filters.limit ?? 500)
+  if (filters.accountId) q = q.eq('account_id', filters.accountId)
+  if (filters.categoryId) q = q.eq('category_id', filters.categoryId)
+  if (filters.merchantId) q = q.eq('merchant_id', filters.merchantId)
+  if (filters.from) q = q.gte('date', filters.from)
+  if (filters.to) q = q.lte('date', filters.to)
+  if (filters.uncategorised) q = q.is('category_id', null).eq('is_transfer', false)
+  if (filters.needsReview) q = q.eq('needs_review', true)
+  if (filters.importBatchId) q = q.eq('import_batch_id', filters.importBatchId)
+  if (filters.recurringOnly) q = q.not('recurring_payment_id', 'is', null)
+  if (filters.search) q = q.or(`description.ilike.%${filters.search}%,merchant_name.ilike.%${filters.search}%,notes.ilike.%${filters.search}%`)
+  const { data, error } = await q
+  throwIf(error)
+  let rows = (data ?? []) as Transaction[]
+  if (filters.minAmountMinor !== undefined) {
+    rows = rows.filter((t) => Math.abs(t.amount_minor) >= filters.minAmountMinor!)
+  }
+  if (filters.maxAmountMinor !== undefined) {
+    rows = rows.filter((t) => Math.abs(t.amount_minor) <= filters.maxAmountMinor!)
+  }
+  return rows
+}
+
+export async function createTransaction(
+  userId: string,
+  input: Partial<Transaction> & { account_id: string; date: string; description: string; amount_minor: number },
+  source: 'manual' | 'import' | 'ai_chat' = 'manual',
+): Promise<Transaction> {
+  const { data, error } = await supabase
+    .from('transactions')
+    .insert({ ...input, user_id: userId, source })
+    .select()
+    .single()
+  throwIf(error)
+  await recordAudit({
+    userId, recordType: 'transaction', recordId: data!.id, action: 'insert', next: input, source, undoable: true,
+  })
+  return data as Transaction
+}
+
+export async function updateTransaction(
+  userId: string,
+  id: string,
+  patch: Partial<Transaction>,
+  source: 'manual' | 'import' | 'ai_chat' = 'manual',
+): Promise<void> {
+  const { data: prev } = await supabase.from('transactions').select('*').eq('id', id).single()
+  const { error } = await supabase.from('transactions').update(patch).eq('id', id)
+  throwIf(error)
+  await recordAudit({
+    userId, recordType: 'transaction', recordId: id, action: 'update', previous: prev, next: patch, source, undoable: true,
+  })
+}
+
+export async function deleteTransaction(userId: string, id: string): Promise<void> {
+  const { data: prev } = await supabase.from('transactions').select('*').eq('id', id).single()
+  const { error } = await supabase.from('transactions').delete().eq('id', id)
+  throwIf(error)
+  await recordAudit({ userId, recordType: 'transaction', recordId: id, action: 'delete', previous: prev })
+}
+
+/** Replace the splits of a transaction. Parts must sum to the transaction amount. */
+export async function setTransactionSplits(
+  userId: string,
+  transactionId: string,
+  parts: { category_id: string | null; amount_minor: number; note?: string }[],
+): Promise<void> {
+  const { data: txn } = await supabase.from('transactions').select('*').eq('id', transactionId).single()
+  if (!txn) throw new Error('Transaction not found')
+  if (parts.length > 0) {
+    const sum = parts.reduce((a, p) => a + p.amount_minor, 0)
+    if (sum !== (txn as Transaction).amount_minor) {
+      throw new Error('Split amounts must add up to the transaction amount')
+    }
+  }
+  await supabase.from('transaction_splits').delete().eq('transaction_id', transactionId)
+  if (parts.length > 0) {
+    const { error } = await supabase.from('transaction_splits').insert(
+      parts.map((p) => ({ ...p, user_id: userId, transaction_id: transactionId })),
+    )
+    throwIf(error)
+  }
+  await recordAudit({
+    userId, recordType: 'transaction_split', recordId: transactionId, action: 'update', next: parts, undoable: true,
+  })
+}
+
+// ------------------------------------------------------------------- budgets
+export async function fetchBudget(month: string): Promise<(Budget & { budget_lines: BudgetLine[] }) | null> {
+  const { data, error } = await supabase
+    .from('budgets')
+    .select('*, budget_lines(*)')
+    .eq('month', month)
+    .maybeSingle()
+  throwIf(error)
+  return data as (Budget & { budget_lines: BudgetLine[] }) | null
+}
+
+export async function createBudget(
+  userId: string,
+  month: string,
+  input: { expected_income_minor?: number; notes?: string },
+): Promise<Budget> {
+  const { data, error } = await supabase
+    .from('budgets')
+    .insert({ user_id: userId, month, ...input })
+    .select()
+    .single()
+  throwIf(error)
+  return data as Budget
+}
+
+export async function upsertBudgetLine(
+  userId: string,
+  budgetId: string,
+  line: { category_id: string | null; kind: BudgetLine['kind']; planned_minor: number; label?: string | null },
+): Promise<void> {
+  const { error } = await supabase.from('budget_lines').upsert(
+    { user_id: userId, budget_id: budgetId, label: line.label ?? null, ...line },
+    { onConflict: 'budget_id,category_id,kind,label' },
+  )
+  throwIf(error)
+}
+
+export async function deleteBudgetLine(id: string): Promise<void> {
+  const { error } = await supabase.from('budget_lines').delete().eq('id', id)
+  throwIf(error)
+}
+
+export async function copyBudgetFrom(
+  userId: string,
+  fromMonth: string,
+  toMonth: string,
+): Promise<Budget | null> {
+  const prev = await fetchBudget(fromMonth)
+  if (!prev) return null
+  const budget = await createBudget(userId, toMonth, {
+    expected_income_minor: prev.expected_income_minor,
+    notes: prev.notes ?? undefined,
+  })
+  if (prev.budget_lines.length > 0) {
+    const { error } = await supabase.from('budget_lines').insert(
+      prev.budget_lines
+        .filter((l) => l.kind !== 'one_off') // one-offs don't repeat by default
+        .map((l) => ({
+          user_id: userId,
+          budget_id: budget.id,
+          category_id: l.category_id,
+          kind: l.kind,
+          label: l.label,
+          planned_minor: l.planned_minor,
+        })),
+    )
+    throwIf(error)
+  }
+  await recordAudit({ userId, recordType: 'budget', recordId: budget.id, action: 'insert', next: { copied_from: fromMonth } })
+  return budget
+}
+
+// ---------------------------------------------------------------- recurring
+export async function fetchRecurring(): Promise<RecurringPayment[]> {
+  const { data, error } = await supabase
+    .from('recurring_payments')
+    .select('*')
+    .order('next_due_date')
+  throwIf(error)
+  return (data ?? []) as RecurringPayment[]
+}
+
+export async function upsertRecurring(
+  userId: string,
+  input: Partial<RecurringPayment> & { name: string; amount_minor: number; frequency: RecurringPayment['frequency']; next_due_date: string },
+  id?: string,
+): Promise<RecurringPayment> {
+  if (id) {
+    const { data, error } = await supabase
+      .from('recurring_payments').update(input).eq('id', id).select().single()
+    throwIf(error)
+    return data as RecurringPayment
+  }
+  const { data, error } = await supabase
+    .from('recurring_payments')
+    .insert({ ...input, user_id: userId })
+    .select()
+    .single()
+  throwIf(error)
+  await recordAudit({ userId, recordType: 'recurring_payment', recordId: data!.id, action: 'insert', next: input, undoable: true })
+  return data as RecurringPayment
+}
+
+// ------------------------------------------------------------------- debts
+export async function fetchLiabilities(): Promise<Liability[]> {
+  const { data, error } = await supabase
+    .from('liabilities')
+    .select('*')
+    .neq('status', 'archived')
+    .order('created_at')
+  throwIf(error)
+  return (data ?? []) as Liability[]
+}
+
+export async function upsertLiability(
+  userId: string,
+  input: Partial<Liability> & { name: string; liability_type: Liability['liability_type'] },
+  id?: string,
+  source: 'manual' | 'ai_chat' | 'import' = 'manual',
+): Promise<Liability> {
+  let row: Liability
+  if (id) {
+    const { data: prev } = await supabase.from('liabilities').select('*').eq('id', id).single()
+    const { data, error } = await supabase.from('liabilities').update(input).eq('id', id).select().single()
+    throwIf(error)
+    row = data as Liability
+    await recordAudit({
+      userId, recordType: 'liability', recordId: id, action: 'update', previous: prev, next: input,
+      source: source === 'manual' ? 'manual' : 'ai_chat', undoable: true,
+    })
+  } else {
+    const { data, error } = await supabase
+      .from('liabilities')
+      .insert({ ...input, user_id: userId })
+      .select()
+      .single()
+    throwIf(error)
+    row = data as Liability
+    await recordAudit({
+      userId, recordType: 'liability', recordId: row.id, action: 'insert', next: input,
+      source: source === 'manual' ? 'manual' : 'ai_chat', undoable: true,
+    })
+  }
+  await writeNetWorthSnapshot(userId)
+  return row
+}
+
+export async function fetchDebtPayments(liabilityId: string): Promise<DebtPayment[]> {
+  const { data, error } = await supabase
+    .from('debt_payments')
+    .select('*')
+    .eq('liability_id', liabilityId)
+    .order('date', { ascending: false })
+  throwIf(error)
+  return (data ?? []) as DebtPayment[]
+}
+
+export async function recordDebtPayment(
+  userId: string,
+  input: { liability_id: string; date: string; amount_minor: number; kind: DebtPayment['kind']; note?: string; transaction_id?: string },
+  source: 'manual' | 'ai_chat' | 'matched' = 'manual',
+): Promise<DebtPayment> {
+  const { data, error } = await supabase
+    .from('debt_payments')
+    .insert({ ...input, user_id: userId, source })
+    .select()
+    .single()
+  throwIf(error)
+  // Reduce the liability's calculated balance by the principal effect of the
+  // payment (interest is captured in the schedule; a simple payment reduces
+  // the stated balance — labelled 'calculated', never lender-confirmed).
+  const { data: liab } = await supabase.from('liabilities').select('*').eq('id', input.liability_id).single()
+  if (liab) {
+    const newBalance = Math.max(0, (liab as Liability).current_balance_minor - input.amount_minor)
+    await supabase
+      .from('liabilities')
+      .update({
+        current_balance_minor: newBalance,
+        balance_source: 'calculated',
+        balance_effective_date: input.date,
+        ...(newBalance === 0 ? { status: 'settled' } : {}),
+      })
+      .eq('id', input.liability_id)
+  }
+  await recordAudit({
+    userId, recordType: 'debt_payment', recordId: data!.id, action: 'insert', next: input,
+    source: source === 'matched' ? 'system' : source === 'manual' ? 'manual' : 'ai_chat', undoable: true,
+  })
+  await writeNetWorthSnapshot(userId)
+  return data as DebtPayment
+}
+
+export async function saveSchedule(
+  userId: string,
+  liabilityId: string,
+  scheduleType: 'original' | 'revised',
+  rows: { paymentNumber: number; dueDate: string; paymentMinor: number; principalMinor: number; interestMinor: number; balanceAfterMinor: number }[],
+): Promise<void> {
+  await supabase
+    .from('loan_payment_schedules')
+    .delete()
+    .eq('liability_id', liabilityId)
+    .eq('schedule_type', scheduleType)
+  if (rows.length === 0) return
+  const { error } = await supabase.from('loan_payment_schedules').insert(
+    rows.map((r) => ({
+      user_id: userId,
+      liability_id: liabilityId,
+      schedule_type: scheduleType,
+      payment_number: r.paymentNumber,
+      due_date: r.dueDate,
+      payment_minor: r.paymentMinor,
+      principal_minor: r.principalMinor,
+      interest_minor: r.interestMinor,
+      balance_after_minor: r.balanceAfterMinor,
+    })),
+  )
+  throwIf(error)
+}
+
+export async function fetchSchedule(liabilityId: string): Promise<LoanScheduleRow[]> {
+  const { data, error } = await supabase
+    .from('loan_payment_schedules')
+    .select('*')
+    .eq('liability_id', liabilityId)
+    .order('schedule_type')
+    .order('payment_number')
+  throwIf(error)
+  return (data ?? []) as LoanScheduleRow[]
+}
+
+// ------------------------------------------------------------------ savings
+export async function fetchSavingsGoals(): Promise<SavingsGoal[]> {
+  const { data, error } = await supabase
+    .from('savings_goals')
+    .select('*')
+    .neq('status', 'archived')
+    .order('priority')
+  throwIf(error)
+  return (data ?? []) as SavingsGoal[]
+}
+
+export async function upsertSavingsGoal(
+  userId: string,
+  input: Partial<SavingsGoal> & { name: string; target_minor: number },
+  id?: string,
+): Promise<SavingsGoal> {
+  if (id) {
+    const { data, error } = await supabase.from('savings_goals').update(input).eq('id', id).select().single()
+    throwIf(error)
+    return data as SavingsGoal
+  }
+  const { data, error } = await supabase
+    .from('savings_goals')
+    .insert({ ...input, user_id: userId })
+    .select()
+    .single()
+  throwIf(error)
+  await recordAudit({ userId, recordType: 'savings_goal', recordId: data!.id, action: 'insert', next: input, undoable: true })
+  return data as SavingsGoal
+}
+
+// -------------------------------------------------------------------- facts
+export async function fetchFacts(): Promise<FinancialFact[]> {
+  const { data, error } = await supabase
+    .from('financial_facts')
+    .select('*')
+    .eq('is_active', true)
+    .order('created_at', { ascending: false })
+  throwIf(error)
+  return (data ?? []) as FinancialFact[]
+}
+
+export async function deleteFact(id: string): Promise<void> {
+  const { error } = await supabase.from('financial_facts').update({ is_active: false }).eq('id', id)
+  throwIf(error)
+}
+
+// ----------------------------------------------------------------- insights
+export async function fetchInsights(status: Insight['status'] = 'active'): Promise<Insight[]> {
+  const { data, error } = await supabase
+    .from('insights')
+    .select('*')
+    .eq('status', status)
+    .order('created_at', { ascending: false })
+    .limit(50)
+  throwIf(error)
+  return (data ?? []) as Insight[]
+}
+
+export async function setInsightStatus(
+  userId: string,
+  id: string,
+  status: Insight['status'],
+  feedback?: 'dismissed' | 'muted_merchant' | 'muted_type' | 'useful' | 'converted',
+): Promise<void> {
+  const { error } = await supabase.from('insights').update({ status }).eq('id', id)
+  throwIf(error)
+  if (feedback) {
+    await supabase.from('insight_feedback').insert({ user_id: userId, insight_id: id, action: feedback })
+  }
+}
+
+// ---------------------------------------------------------------- documents
+export async function uploadDocument(
+  userId: string,
+  file: File,
+  kind: DocumentRow['kind'],
+): Promise<DocumentRow> {
+  const allowed = ['image/png', 'image/jpeg', 'application/pdf', 'text/csv', 'application/vnd.ms-excel']
+  if (!allowed.includes(file.type)) throw new Error(`Unsupported file type: ${file.type || 'unknown'}`)
+  if (file.size > 15 * 1024 * 1024) throw new Error('File exceeds the 15 MB limit')
+  const path = `${userId}/${Date.now()}-${file.name.replace(/[^\w.-]/g, '_')}`
+  const { error: upErr } = await supabase.storage.from('documents').upload(path, file)
+  if (upErr) throw new Error(upErr.message)
+  const { data, error } = await supabase
+    .from('documents')
+    .insert({
+      user_id: userId,
+      storage_path: path,
+      file_name: file.name,
+      mime_type: file.type,
+      size_bytes: file.size,
+      kind,
+    })
+    .select()
+    .single()
+  throwIf(error)
+  return data as DocumentRow
+}
+
+export async function deleteDocumentFile(doc: DocumentRow): Promise<void> {
+  await supabase.storage.from('documents').remove([doc.storage_path])
+  await supabase
+    .from('documents')
+    .update({ status: 'deleted', deleted_at: new Date().toISOString() })
+    .eq('id', doc.id)
+}
+
+export async function signedUrl(path: string): Promise<string> {
+  const { data, error } = await supabase.storage.from('documents').createSignedUrl(path, 300)
+  if (error) throw new Error(error.message)
+  return data.signedUrl
+}
+
+// ------------------------------------------------------------------ imports
+export async function fetchBatches(): Promise<ImportBatch[]> {
+  const { data, error } = await supabase
+    .from('import_batches')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(50)
+  throwIf(error)
+  return (data ?? []) as ImportBatch[]
+}
+
+export async function fetchBatchItems(batchId: string): Promise<ImportedItem[]> {
+  const { data, error } = await supabase
+    .from('imported_items')
+    .select('*')
+    .eq('batch_id', batchId)
+    .order('proposed_date')
+  throwIf(error)
+  return (data ?? []) as ImportedItem[]
+}
+
+/** Undo a completed import batch: delete its transactions, mark it undone. */
+export async function undoImportBatch(userId: string, batchId: string): Promise<number> {
+  const { data: txns } = await supabase.from('transactions').select('id').eq('import_batch_id', batchId)
+  const count = txns?.length ?? 0
+  await supabase.from('transactions').delete().eq('import_batch_id', batchId)
+  await supabase.from('import_batches').update({ status: 'undone' }).eq('id', batchId)
+  await recordAudit({
+    userId, recordType: 'import_batch', recordId: batchId, action: 'undo',
+    next: { deleted_transactions: count }, source: 'undo',
+  })
+  return count
+}
+
+// --------------------------------------------------------------------- chat
+export async function fetchConversations(): Promise<ChatConversation[]> {
+  const { data, error } = await supabase
+    .from('chat_conversations')
+    .select('*')
+    .order('updated_at', { ascending: false })
+    .limit(30)
+  throwIf(error)
+  return (data ?? []) as ChatConversation[]
+}
+
+export async function fetchMessages(conversationId: string): Promise<ChatMessage[]> {
+  const { data, error } = await supabase
+    .from('chat_messages')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .order('created_at')
+  throwIf(error)
+  return (data ?? []) as ChatMessage[]
+}
+
+// -------------------------------------------------------------------- audit
+export async function fetchAuditEvents(limit = 100): Promise<AuditEvent[]> {
+  const { data, error } = await supabase
+    .from('audit_events')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  throwIf(error)
+  return (data ?? []) as AuditEvent[]
+}
+
+// ------------------------------------------------------------------ profile
+export async function fetchProfile(): Promise<Record<string, unknown> | null> {
+  const { data } = await supabase.from('profiles').select('*').maybeSingle()
+  return data
+}
+
+export async function updateProfile(userId: string, patch: Record<string, unknown>): Promise<void> {
+  const { error } = await supabase.from('profiles').update(patch).eq('id', userId)
+  throwIf(error)
+}
+
+/** Full data export as a JSON blob (Settings → Export). */
+export async function exportAllData(): Promise<Blob> {
+  const tables = [
+    'accounts', 'account_balance_snapshots', 'transactions', 'transaction_splits',
+    'merchants', 'merchant_aliases', 'categories', 'categorisation_rules',
+    'budgets', 'budget_lines', 'recurring_payments', 'liabilities',
+    'loan_payment_schedules', 'debt_payments', 'net_worth_snapshots',
+    'savings_goals', 'financial_facts', 'documents', 'import_batches',
+    'imported_items', 'insights', 'audit_events',
+  ]
+  const out: Record<string, unknown[]> = {}
+  for (const t of tables) {
+    const { data } = await supabase.from(t).select('*')
+    out[t] = data ?? []
+  }
+  return new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' })
+}
