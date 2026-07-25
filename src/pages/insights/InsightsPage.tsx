@@ -22,6 +22,8 @@ import {
   Bar,
   BarChart,
   Cell,
+  Line,
+  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -145,6 +147,40 @@ export default function InsightsPage() {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 8)
     .map(([name, v]) => ({ name, value: v / 100 }))
+
+  // Income vs spending per month (last 6 months, from wide history)
+  const byMonth = new Map<string, { spend: number; income: number }>()
+  for (const t of historyTxns ?? []) {
+    if (t.is_transfer || t.exclude_from_analytics || t.is_reimbursable) continue
+    const key = t.date.slice(0, 7)
+    const entry = byMonth.get(key) ?? { spend: 0, income: 0 }
+    if (t.amount_minor < 0) entry.spend += -t.amount_minor / 100
+    else entry.income += t.amount_minor / 100
+    byMonth.set(key, entry)
+  }
+  const monthlyData = [...byMonth.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-6)
+    .map(([k, v]) => ({
+      month: new Date(`${k}-01T00:00:00`).toLocaleDateString('en-GB', { month: 'short' }),
+      Spending: Math.round(v.spend),
+      Income: Math.round(v.income),
+    }))
+
+  // Cumulative spending across the selected range
+  const cumulative: { date: string; total: number }[] = []
+  {
+    let run = 0
+    const spendTxns = (txns ?? [])
+      .filter((t) => !t.is_transfer && !t.exclude_from_analytics && !t.is_reimbursable && t.amount_minor < 0)
+      .sort((a, b) => a.date.localeCompare(b.date))
+    for (const t of spendTxns) {
+      run += -t.amount_minor / 100
+      const last = cumulative[cumulative.length - 1]
+      if (last && last.date === t.date) last.total = run
+      else cumulative.push({ date: t.date, total: run })
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -302,6 +338,56 @@ export default function InsightsPage() {
                 </BarChart>
               </ResponsiveContainer>
             </div>
+          )}
+        </Card>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Card>
+          <CardTitle>Income vs spending — last 6 months</CardTitle>
+          {monthlyData.length === 0 ? (
+            <p className="text-xs text-ink-faint">Import some transactions to see the trend.</p>
+          ) : (
+            <>
+              <div className="h-52">
+                <ResponsiveContainer>
+                  <BarChart data={monthlyData} margin={{ top: 4, right: 8, bottom: 0, left: 4 }} barGap={2}>
+                    <XAxis dataKey="month" tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }} stroke={gridStroke} />
+                    <YAxis tickFormatter={(v: number) => `£${v >= 1000 ? `${Math.round(v / 1000)}k` : v}`} tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }} stroke={gridStroke} width={48} />
+                    <Tooltip contentStyle={tooltipStyle} formatter={gbpTooltip} cursor={{ fill: 'color-mix(in srgb, var(--app-border) 40%, transparent)' }} />
+                    <Bar dataKey="Income" fill="var(--app-good)" radius={[4, 4, 0, 0]} barSize={14} />
+                    <Bar dataKey="Spending" fill="var(--app-accent)" radius={[4, 4, 0, 0]} barSize={14} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="mt-1 flex gap-3 text-[11px] text-ink-muted">
+                <span><span className="mr-1 inline-block h-2 w-2 rounded-full bg-good" />Income</span>
+                <span><span className="mr-1 inline-block h-2 w-2 rounded-full bg-accent" />Spending</span>
+              </div>
+            </>
+          )}
+        </Card>
+
+        <Card>
+          <CardTitle>Cumulative spending — selected range</CardTitle>
+          {cumulative.length < 2 ? (
+            <p className="text-xs text-ink-faint">Not enough spending in this range yet.</p>
+          ) : (
+            <>
+              <p className="mb-1 text-xs text-ink-muted">
+                Running total reaches {money(Math.round(cumulative[cumulative.length - 1].total * 100))}
+              </p>
+              <div className="h-52">
+                <ResponsiveContainer>
+                  <LineChart data={cumulative} margin={{ top: 4, right: 8, bottom: 0, left: 4 }}>
+                    <XAxis dataKey="date" tickFormatter={(d: string) => formatDate(d).slice(0, 6)} tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }} stroke={gridStroke} interval="preserveStartEnd" />
+                    <YAxis tickFormatter={(v: number) => `£${v >= 1000 ? `${Math.round(v / 1000)}k` : Math.round(v)}`} tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }} stroke={gridStroke} width={48} />
+                    <Tooltip contentStyle={tooltipStyle} formatter={(v: unknown) => [money(Math.round(Number(v ?? 0) * 100)), 'Spent so far']} />
+                    <Line type="monotone" dataKey="total" stroke="var(--app-accent)" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </>
           )}
         </Card>
       </div>

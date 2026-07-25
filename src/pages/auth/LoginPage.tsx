@@ -1,7 +1,6 @@
 import { Button, Card, Input, Label, PasswordInput } from '@/components/ui/primitives'
 import { useAuth } from '@/context/AuthContext'
 import { supabaseConfigured } from '@/lib/supabase'
-import { Banknote } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 
 type Mode = 'signin' | 'signup' | 'reset'
@@ -41,11 +40,12 @@ export default function LoginPage() {
   return (
     <div className="flex min-h-dvh items-center justify-center p-4">
       <Card className="w-full max-w-sm p-6">
-        <div className="mb-5 flex items-center gap-2.5">
-          <span className="grad-accent flex h-10 w-10 items-center justify-center rounded-2xl shadow-sm">
-            <Banknote className="h-5 w-5 text-white" />
-          </span>
-          <h1 className="text-xl font-extrabold tracking-tight">My Money</h1>
+        <div className="mb-5 flex items-center gap-3">
+          <img src="/logo.svg" alt="My Money" className="h-11 w-11 rounded-2xl shadow-md" />
+          <div>
+            <h1 className="text-xl font-extrabold tracking-tight">My Money</h1>
+            <p className="text-[11px] text-ink-faint">Your private financial command centre</p>
+          </div>
         </div>
         {!supabaseConfigured && (
           <p className="mb-4 rounded-lg bg-warn/10 p-3 text-xs text-warn">

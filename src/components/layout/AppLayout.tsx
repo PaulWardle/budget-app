@@ -3,7 +3,6 @@ import { useAuth } from '@/context/AuthContext'
 import { useTheme } from '@/context/ThemeContext'
 import { cn } from '@/lib/utils'
 import {
-  Banknote,
   CalendarClock,
   CreditCard,
   FileUp,
@@ -44,9 +43,7 @@ export default function AppLayout() {
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 hidden w-56 flex-col border-r border-border bg-surface p-3 lg:flex">
         <div className="mb-4 flex items-center gap-2.5 px-2 pt-1">
-          <span className="grad-accent flex h-8 w-8 items-center justify-center rounded-xl shadow-sm">
-            <Banknote className="h-4.5 w-4.5 text-white" />
-          </span>
+          <img src="/logo.svg" alt="" className="h-8 w-8 rounded-xl shadow-sm" />
           <span className="text-base font-extrabold tracking-tight">My Money</span>
         </div>
         <nav className="flex-1 space-y-0.5">

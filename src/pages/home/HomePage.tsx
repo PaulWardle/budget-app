@@ -1,4 +1,6 @@
-import { PageHeader, StalenessNote, Stat } from '@/components/shared/common'
+import { PageHeader, StalenessNote, Stat, categoryLabel } from '@/components/shared/common'
+import { assignColors, gbpTooltip, isDarkMode, tooltipStyle } from '@/components/charts/theme'
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts'
 import { Badge, Card, CardTitle, ProgressBar, Spinner } from '@/components/ui/primitives'
 import {
   buildNetWorthItems,
@@ -89,6 +91,21 @@ export default function HomePage() {
     : []
   const summary = budget ? budgetSummary(budget.expected_income_minor, lines, actuals) : null
   const atRisk = lines.filter((l) => l.status !== 'on_track')
+
+  // Spending-by-category donut (current month)
+  const dark = isDarkMode()
+  const donutSource = [...actuals.values()]
+    .filter((a) => a.spentMinor > 0)
+    .sort((a, b) => b.spentMinor - a.spentMinor)
+  const donutTop = donutSource.slice(0, 5).map((a) => ({
+    name: categoryLabel(categories, a.categoryId),
+    value: a.spentMinor / 100,
+  }))
+  const donutRest = donutSource.slice(5)
+  if (donutRest.length > 0) {
+    donutTop.push({ name: 'Other', value: donutRest.reduce((s2, a) => s2 + a.spentMinor, 0) / 100 })
+  }
+  const donutColors = assignColors(donutTop.map((d) => d.name), dark)
 
   // ---- Upcoming commitments (30 days) ----
   const in30 = new Date()
@@ -249,6 +266,41 @@ export default function HomePage() {
                 </div>
               )
             })}
+          </div>
+        </Card>
+      )}
+
+      {/* Spending donut */}
+      {donutTop.length > 0 && (
+        <Card>
+          <CardTitle>Spending by category this month</CardTitle>
+          <div className="flex flex-col items-center gap-3 sm:flex-row">
+            <div className="h-44 w-44 shrink-0">
+              <ResponsiveContainer>
+                <PieChart>
+                  <Pie data={donutTop} dataKey="value" nameKey="name" innerRadius={45} outerRadius={70} paddingAngle={2} stroke="var(--app-surface)" strokeWidth={2}>
+                    {donutTop.map((d) => (
+                      <Cell key={d.name} fill={donutColors.get(d.name)} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={tooltipStyle} formatter={gbpTooltip} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="w-full flex-1 space-y-1">
+              {donutTop.map((d) => (
+                <div key={d.name} className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: donutColors.get(d.name) }} />
+                    {d.name}
+                  </span>
+                  <span className="tnum text-ink-muted">{money(Math.round(d.value * 100))}</span>
+                </div>
+              ))}
+              <p className="pt-1 text-[11px] text-ink-faint">
+                Largest: {donutTop[0].name} at {money(Math.round(donutTop[0].value * 100))} of {money(spendingToDate)} total
+              </p>
+            </div>
           </div>
         </Card>
       )}

@@ -26,6 +26,8 @@ import { daysInMonthOf, money, monthLabel, monthStartIso, todayIso } from '@/lib
 import type { BudgetLineKind } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
+import { chartAxis, gbpTooltip, gridStroke, tooltipStyle } from '@/components/charts/theme'
+import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -189,6 +191,46 @@ export default function BudgetPage() {
                     run-rate + commitments ⓘ
                   </p>
                 </div>
+              </div>
+            </Card>
+          )}
+
+          {lines.length > 0 && (
+            <Card className="mb-4">
+              <CardTitle>Budget vs actual by category</CardTitle>
+              <p className="mb-2 text-xs text-ink-muted">
+                Pale bar = budget, solid bar = spent so far. Overspent categories show in red.
+              </p>
+              <div style={{ height: Math.max(160, Math.min(lines.length, 8) * 44) }}>
+                <ResponsiveContainer>
+                  <BarChart
+                    layout="vertical"
+                    data={[...lines]
+                      .sort((a, b) => b.plannedMinor - a.plannedMinor)
+                      .slice(0, 8)
+                      .map((l) => ({
+                        name: (budget.budget_lines.find((bl) => bl.category_id === l.categoryId && bl.kind === l.kind)?.label) ?? categoryLabel(categories, l.categoryId),
+                        Budget: l.plannedMinor / 100,
+                        Spent: l.actualMinor / 100,
+                        over: l.actualMinor > l.plannedMinor,
+                      }))}
+                    margin={{ top: 0, right: 8, bottom: 0, left: 0 }}
+                    barGap={-14}
+                  >
+                    <XAxis type="number" tickFormatter={(v: number) => `£${v >= 1000 ? `${Math.round(v / 1000)}k` : Math.round(v)}`} tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }} stroke={gridStroke} />
+                    <YAxis type="category" dataKey="name" width={120} tick={{ ...chartAxis, fill: 'var(--app-ink-muted)' }} stroke={gridStroke} />
+                    <Tooltip contentStyle={tooltipStyle} formatter={gbpTooltip} cursor={{ fill: 'color-mix(in srgb, var(--app-border) 40%, transparent)' }} />
+                    <Bar dataKey="Budget" fill="color-mix(in srgb, var(--app-accent) 22%, transparent)" radius={[0, 4, 4, 0]} barSize={14} />
+                    <Bar dataKey="Spent" radius={[0, 4, 4, 0]} barSize={14}>
+                      {[...lines]
+                        .sort((a, b) => b.plannedMinor - a.plannedMinor)
+                        .slice(0, 8)
+                        .map((l) => (
+                          <Cell key={`${l.categoryId}-${l.kind}`} fill={l.actualMinor > l.plannedMinor ? 'var(--app-bad)' : 'var(--app-accent)'} />
+                        ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
             </Card>
           )}
