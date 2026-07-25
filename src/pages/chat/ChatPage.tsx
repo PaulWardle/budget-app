@@ -1,7 +1,7 @@
 import { AccountSelect, PageHeader } from '@/components/shared/common'
 import { Badge, Button, Card, Spinner, Textarea } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchAccounts, fetchConversations, fetchMessages, logAppError, recordAudit } from '@/lib/api'
+import { fetchAccounts, fetchConversations, fetchMessages, logAppError, recordAudit, uploadDocument } from '@/lib/api'
 import { isSupportedUpload, processUpload } from '@/lib/importFlow'
 import { supabase } from '@/lib/supabase'
 import type { ChatActionSummary, ChatMessage } from '@/types/domain'
@@ -121,9 +121,18 @@ export default function ChatPage() {
       setPending(text)
       setError(null)
       const convId = await ensureConversation(text)
+      // An attached photo goes to the assistant itself so it can read the
+      // document and act on what it actually says — not through the
+      // statement-import pipeline.
+      let documentIds: string[] | undefined
+      if (attached) {
+        const doc = await uploadDocument(userId, attached, 'other')
+        documentIds = [doc.id]
+        setAttached(null)
+      }
       const { data: session } = await supabase.auth.getSession()
       const { data, error: fnErr } = await supabase.functions.invoke('ai-chat', {
-        body: { conversation_id: convId, message: text },
+        body: { conversation_id: convId, message: text, document_ids: documentIds },
         headers: { Authorization: `Bearer ${session.session?.access_token}` },
       })
       if (fnErr) {
@@ -235,26 +244,36 @@ export default function ChatPage() {
         <div ref={bottomRef} />
       </div>
       {attached && (
-        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface p-2.5">
-          <Paperclip className="h-4 w-4 shrink-0 text-ink-faint" />
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">{attached.name}</span>
-          <div className="w-44">
-            <AccountSelect
-              accounts={accounts ?? []}
-              value={attachAccountId}
-              onChange={setAttachAccountId}
-            />
+        <div className="mb-2 rounded-xl border border-border bg-surface p-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <Paperclip className="h-4 w-4 shrink-0 text-ink-faint" />
+            <span className="min-w-0 flex-1 truncate text-xs font-medium">{attached.name}</span>
+            <Button size="sm" variant="ghost" onClick={() => setAttached(null)}>
+              Remove
+            </Button>
           </div>
-          <Button
-            size="sm"
-            onClick={() => importAttachment.mutate()}
-            disabled={importAttachment.isPending || !attachAccountId}
-          >
-            {importAttachment.isPending ? 'Reading…' : 'Import'}
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => setAttached(null)}>
-            Cancel
-          </Button>
+          <p className="mt-1.5 text-[11px] text-ink-faint">
+            Say what this is and I'll read it — e.g. “these are my regular direct debits”. Nothing
+            is added to your transactions unless you import it as a statement.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-ink-muted">It's a bank statement?</span>
+            <div className="w-40">
+              <AccountSelect
+                accounts={accounts ?? []}
+                value={attachAccountId}
+                onChange={setAttachAccountId}
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => importAttachment.mutate()}
+              disabled={importAttachment.isPending || !attachAccountId}
+            >
+              {importAttachment.isPending ? 'Reading…' : 'Import transactions'}
+            </Button>
+          </div>
         </div>
       )}
       <div className="flex items-end gap-2 border-t border-border pt-3">

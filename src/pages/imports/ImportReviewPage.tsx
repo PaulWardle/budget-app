@@ -4,7 +4,7 @@ import { useUserId } from '@/context/AuthContext'
 import { fetchAccounts, fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, recordAudit, syncRecurringFromLedger, updateAccount } from '@/lib/api'
 import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
 import { dedupeHash } from '@/lib/engine/duplicates'
-import { formatDate, money } from '@/lib/format'
+import { formatDate, money, todayIso } from '@/lib/format'
 import { supabase } from '@/lib/supabase'
 import type { ImportedItem } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -79,7 +79,9 @@ export default function ImportReviewPage() {
             runningBalanceMinor: i.running_balance_minor,
             rawText: i.raw_text,
             status: i.status,
-            include: i.duplicate_of === null, // possible duplicates default to excluded
+            // Possible duplicates and future-dated rows (an upcoming-bills
+            // list, not a statement) default to excluded.
+            include: i.duplicate_of === null && (i.proposed_date ?? '') <= todayIso(),
             }
           }),
       )
@@ -358,6 +360,12 @@ export default function ImportReviewPage() {
               {e.duplicateOf && (
                 <Badge tone="warn">
                   possible duplicate ({Math.round((e.duplicateScore ?? 0) * 100)}% match) — tick to import anyway
+                </Badge>
+              )}
+              {e.date > todayIso() && (
+                <Badge tone="warn">
+                  dated in the future — this looks like an upcoming bill, not a payment that
+                  happened. Untick unless you meant to record it.
                 </Badge>
               )}
               {!e.duplicateOf && (e.duplicateScore ?? 0) >= 0.5 && (

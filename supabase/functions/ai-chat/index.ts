@@ -948,6 +948,8 @@ Core rules:
 - When the user teaches you a merchant meaning, use create_merchant_rule AND create_financial_fact.
 - When the user reports a miscategorisation ("Tesco Bank was marked as groceries but it's my loan"), fix it yourself: create_merchant_rule with the right category and apply_to_past=true recategorises the history AND prevents it recurring. Confirm how many transactions were fixed. Never just explain how to do it manually.
 - You can create, rename and reorganise categories yourself (create_category, update_category), and create_merchant_rule creates any category it names that doesn't exist. Never send the user to Settings to manage categories — do it, then verify with find_transactions if the user doubts a change stuck.
+- When the user attaches a photo, screenshot or PDF, READ IT and work from what it actually shows. Record exactly the items on the document — never pad the list with things you inferred from the ledger, and never treat a document as a bank statement unless it plainly is one. A list of forthcoming direct debits is a list of BILLS to set up with create_recurring_payment; it is not spending that has happened, so never record those as transactions.
+- Only propose a recurring payment when the user asked for it or the evidence is strong (a document that lists it, or a clear repeating pattern). One-off or variable card payments to a company are not a direct debit. When unsure, ask — do not list speculative bills as if they were facts.
 - When an amount is mentioned without currency, assume GBP.
 - Transfers between the user's own accounts are not spending.
 - Be concise and factual. Use British English and £. Never moralise about ordinary spending.
@@ -963,7 +965,7 @@ Deno.serve(async (req) => {
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY')
   if (!apiKey) return json({ error: 'ANTHROPIC_API_KEY is not configured' }, 503)
 
-  let body: { conversation_id?: string; message?: string }
+  let body: { conversation_id?: string; message?: string; document_ids?: string[] }
   try {
     body = await req.json()
   } catch {
@@ -994,6 +996,36 @@ Deno.serve(async (req) => {
   const anthropic = new Anthropic({ apiKey })
   const contextBlock = await buildContext(ctx)
 
+  // Attached photos/PDFs are given to the assistant directly so it can read
+  // what the document actually says instead of inferring from the ledger.
+  const attachments: Anthropic.Beta.BetaContentBlockParam[] = []
+  for (const docId of (body.document_ids ?? []).slice(0, 4)) {
+    const { data: doc } = await ctx.supabase
+      .from('documents')
+      .select('storage_path,mime_type')
+      .eq('id', docId)
+      .single()
+    if (!doc) continue
+    const { data: file } = await ctx.supabase.storage
+      .from('documents')
+      .download((doc as { storage_path: string }).storage_path)
+    if (!file) continue
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    if (bytes.byteLength > 8 * 1024 * 1024) continue
+    let b64 = ''
+    const chunk = 0x8000
+    for (let i = 0; i < bytes.length; i += chunk) {
+      b64 += String.fromCharCode(...bytes.subarray(i, i + chunk))
+    }
+    b64 = btoa(b64)
+    const mime = (doc as { mime_type: string }).mime_type
+    attachments.push(
+      mime === 'application/pdf'
+        ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
+        : { type: 'image', source: { type: 'base64', media_type: mime as 'image/png' | 'image/jpeg', data: b64 } },
+    )
+  }
+
   const messages: Anthropic.Beta.BetaMessageParam[] = [
     ...((history ?? []) as { role: 'user' | 'assistant'; content: string }[])
       .reverse()
@@ -1004,6 +1036,7 @@ Deno.serve(async (req) => {
       // Cache breakpoint: iterations 2-8 of the tool loop reuse this whole
       // prefix (system + tools + context) at ~10% of the input price.
       content: [
+        ...attachments,
         {
           type: 'text',
           text: `${contextBlock}\n\nUSER MESSAGE:\n${userMessage}`,
