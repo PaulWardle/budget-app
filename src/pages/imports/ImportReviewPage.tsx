@@ -1,7 +1,8 @@
-import { CategorySelect, ConfidenceBadge, MoneyInput, PageHeader } from '@/components/shared/common'
+import { AccountSelect, CategorySelect, ConfidenceBadge, MoneyInput, PageHeader } from '@/components/shared/common'
 import { Badge, Button, Card, Input, Spinner } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, recordAudit } from '@/lib/api'
+import { fetchAccounts, fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, recordAudit } from '@/lib/api'
+import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
 import { dedupeHash } from '@/lib/engine/duplicates'
 import { formatDate, money } from '@/lib/format'
 import { supabase } from '@/lib/supabase'
@@ -31,7 +32,15 @@ export default function ImportReviewPage() {
   const userId = useUserId()
   const qc = useQueryClient()
   const navigate = useNavigate()
-  const { data: batches } = useQuery({ queryKey: ['batches'], queryFn: fetchBatches })
+  const { data: batches } = useQuery({
+    queryKey: ['batches'],
+    queryFn: fetchBatches,
+    refetchInterval: (q) =>
+      (q.state.data ?? []).some((b) => b.id === batchId && (b.status === 'processing' || b.status === 'pending'))
+        ? 2500
+        : false,
+  })
+  const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: items, isLoading } = useQuery({
     queryKey: ['batch-items', batchId],
     queryFn: () => fetchBatchItems(batchId!),
@@ -41,21 +50,29 @@ export default function ImportReviewPage() {
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
   const [edits, setEdits] = useState<EditableItem[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [pickedAccountId, setPickedAccountId] = useState<string | null>(null)
 
   const batch = batches?.find((b) => b.id === batchId)
 
   useEffect(() => {
-    if (items) {
+    if (items && categories) {
       setEdits(
         items
           .filter((i) => i.status === 'proposed')
-          .map((i) => ({
+          .map((i) => {
+            // Fill unmistakable merchants automatically; leave doubt flagged.
+            const builtin = i.proposed_category_id
+              ? null
+              : suggestFromDescription(i.proposed_description ?? '')
+            return {
             id: i.id,
             date: i.proposed_date ?? '',
             description: i.proposed_description ?? '',
-            merchant: i.proposed_merchant ?? '',
+            merchant: i.proposed_merchant ?? builtin?.merchant ?? '',
             amountMinor: i.proposed_amount_minor,
-            categoryId: i.proposed_category_id,
+            categoryId:
+              i.proposed_category_id ??
+              (builtin ? resolveCategoryId(categories, builtin.path) : null),
             confidence: i.confidence,
             duplicateOf: i.duplicate_of,
             duplicateScore: i.duplicate_score,
@@ -63,20 +80,24 @@ export default function ImportReviewPage() {
             rawText: i.raw_text,
             status: i.status,
             include: i.duplicate_of === null, // possible duplicates default to excluded
-          })),
+            }
+          }),
       )
     }
-  }, [items])
+  }, [items, categories])
 
   const confirm = useMutation({
     mutationFn: async () => {
       if (!batch) throw new Error('Batch not found')
+      const accountId = batch.account_id ?? pickedAccountId
+      if (!accountId) throw new Error('Choose which account these transactions belong to first.')
+      if (!batch.account_id) {
+        await supabase.from('import_batches').update({ account_id: accountId }).eq('id', batch.id)
+      }
       const chosen = edits.filter((e) => e.include && e.amountMinor !== null && e.date && e.description)
       const rejected = edits.filter((e) => !e.include)
       let confirmedCount = 0
       for (const e of chosen) {
-        const accountId = batch.account_id
-        if (!accountId) throw new Error('This batch has no account — set one when uploading statements.')
         const { data: txn, error: tErr } = await supabase
           .from('transactions')
           .insert({
@@ -196,12 +217,33 @@ export default function ImportReviewPage() {
         title="Import review"
         sub={`${batch?.file_name ?? ''} · ${edits.length} extracted · ${included} selected · net ${money(total)}`}
         actions={
-          <Button onClick={() => confirm.mutate()} disabled={confirm.isPending || included === 0}>
+          <Button
+            onClick={() => confirm.mutate()}
+            disabled={confirm.isPending || included === 0 || (!batch?.account_id && !pickedAccountId)}
+          >
             {confirm.isPending ? 'Saving…' : `Save ${included} transactions`}
           </Button>
         }
       />
       {error && <p className="mb-3 text-xs text-bad">{error}</p>}
+      {batch && !batch.account_id && (
+        <Card className="mb-3">
+          <p className="mb-2 text-xs font-semibold">
+            Which account do these transactions belong to?
+          </p>
+          <div className="max-w-xs">
+            <AccountSelect
+              accounts={accounts ?? []}
+              value={pickedAccountId}
+              onChange={setPickedAccountId}
+              allowNone
+            />
+          </div>
+          <p className="mt-1 text-[11px] text-ink-faint">
+            The upload was made without an account — pick one to enable saving.
+          </p>
+        </Card>
+      )}
       <p className="mb-3 text-xs text-ink-muted">
         Check everything before saving — especially low-confidence rows. Possible duplicates are
         unticked by default rather than deleted, so nothing is lost silently.

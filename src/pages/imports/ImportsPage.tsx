@@ -22,7 +22,15 @@ export default function ImportsPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
-  const { data: batches, isLoading } = useQuery({ queryKey: ['batches'], queryFn: fetchBatches })
+  const { data: batches, isLoading } = useQuery({
+    queryKey: ['batches'],
+    queryFn: fetchBatches,
+    // Live-update while any extraction is running — no manual refresh needed
+    refetchInterval: (q) =>
+      (q.state.data ?? []).some((b) => b.status === 'processing' || b.status === 'pending')
+        ? 2500
+        : false,
+  })
   const { data: transactions } = useQuery({
     queryKey: ['transactions', 'quality'],
     queryFn: () => fetchTransactions({ limit: 2000 }),
@@ -40,7 +48,9 @@ export default function ImportsPage() {
       let lastBatchId: string | null = null
       for (const file of files) {
         setStatus(`Processing ${file.name}…`)
-        const outcome = await processUpload(userId, file, accountId)
+        const outcome = await processUpload(userId, file, accountId, {
+          onBatchCreated: () => qc.invalidateQueries({ queryKey: ['batches'] }),
+        })
         if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Import failed')
         lastBatchId = outcome.batchId
       }

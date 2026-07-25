@@ -3,7 +3,8 @@
 // images/PDFs go to the ai-extract edge function. Everything lands as
 // PROPOSED items for the review screen — nothing enters the ledger directly.
 
-import { applyRules, fetchRules, fetchTransactions, recordAudit, uploadDocument } from '@/lib/api'
+import { applyRules, fetchCategories, fetchRules, fetchTransactions, recordAudit, uploadDocument } from '@/lib/api'
+import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
 import { parseStatementCsv } from '@/lib/csv'
 import { findDuplicates } from '@/lib/engine/duplicates'
 import { supabase } from '@/lib/supabase'
@@ -33,6 +34,7 @@ export async function processUpload(
   userId: string,
   file: File,
   accountId: string | null,
+  opts: { onBatchCreated?: (batchId: string) => void } = {},
 ): Promise<UploadOutcome> {
   const isCsv = isCsvFile(file)
   const doc = await uploadDocument(userId, file, 'statement')
@@ -50,6 +52,7 @@ export async function processUpload(
     .select()
     .single()
   if (bErr) throw new Error(bErr.message)
+  opts.onBatchCreated?.(batch.id)
 
   if (isCsv) {
     const text = await file.text()
@@ -59,6 +62,7 @@ export async function processUpload(
       return { batchId: batch.id, status: 'failed', extracted: 0, fileName: file.name, error: parsed.error }
     }
     const rules = await fetchRules()
+    const categories = await fetchCategories()
     const ledger = accountId
       ? await fetchTransactions({ accountId, limit: 2000 })
       : []
@@ -72,6 +76,10 @@ export async function processUpload(
     }))
     const items = parsed.transactions.map((t) => {
       const ruleHit = applyRules(t.description, rules)
+      // Learned rules win; otherwise fall back to the built-in dictionary of
+      // unmistakable merchants. Anything ambiguous stays uncategorised.
+      const builtin = ruleHit ? null : suggestFromDescription(t.description)
+      const builtinCategoryId = builtin ? resolveCategoryId(categories, builtin.path) : null
       const dupes = accountId
         ? findDuplicates(
             {
@@ -93,8 +101,8 @@ export async function processUpload(
         proposed_date: t.date,
         proposed_description: t.description,
         proposed_amount_minor: t.amountMinor,
-        proposed_merchant: null,
-        proposed_category_id: ruleHit?.categoryId ?? null,
+        proposed_merchant: builtin?.merchant ?? null,
+        proposed_category_id: ruleHit?.categoryId ?? builtinCategoryId,
         running_balance_minor: t.balanceMinor,
         confidence: 0.98, // deterministic parse
         duplicate_of: top && top.score >= 0.75 ? top.existingId : null,
