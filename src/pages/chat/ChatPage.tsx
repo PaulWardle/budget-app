@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 const SUGGESTIONS = [
+  'Let me tell you about my finances…',
   'How much did I spend eating out last month?',
   'Voy is my monthly TRT.',
   'I still owe £500 on PayPal.',

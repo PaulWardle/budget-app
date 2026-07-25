@@ -1,5 +1,5 @@
 import { PageHeader } from '@/components/shared/common'
-import { Badge, Button, Card, CardTitle, Input, Label, PasswordInput, Select, Spinner } from '@/components/ui/primitives'
+import { Badge, Button, Card, CardTitle, Input, Label, PasswordInput, Select, Spinner, Textarea } from '@/components/ui/primitives'
 import { useAuth, useUserId } from '@/context/AuthContext'
 import { useTheme } from '@/context/ThemeContext'
 import {
@@ -30,6 +30,41 @@ export default function SettingsPage() {
   const [passwordMsg, setPasswordMsg] = useState<string | null>(null)
   const [newCategory, setNewCategory] = useState('')
   const [newCatParent, setNewCatParent] = useState<string>('')
+  const [notes, setNotes] = useState<string | null>(null)
+  const [notesMsg, setNotesMsg] = useState<string | null>(null)
+
+  const existingNotes = (facts ?? []).find(
+    (f) => f.fact_type === 'context' && f.fact_key === 'user_notes',
+  )
+  const notesValue = notes ?? ((existingNotes?.value as { text?: string } | undefined)?.text ?? '')
+
+  const saveNotes = useMutation({
+    mutationFn: async () => {
+      const value = { text: (notes ?? '').slice(0, 6000) }
+      if (existingNotes) {
+        const { error } = await supabase
+          .from('financial_facts')
+          .update({ value, last_confirmed_at: new Date().toISOString() })
+          .eq('id', existingNotes.id)
+        if (error) throw new Error(error.message)
+      } else {
+        const { error } = await supabase.from('financial_facts').insert({
+          user_id: userId,
+          fact_type: 'context',
+          fact_key: 'user_notes',
+          value,
+          source: 'manual',
+          confidence: 'confirmed',
+        })
+        if (error) throw new Error(error.message)
+      }
+    },
+    onSuccess: () => {
+      setNotesMsg('Saved — the AI will use this in every conversation.')
+      qc.invalidateQueries({ queryKey: ['facts'] })
+    },
+    onError: (e: Error) => setNotesMsg(e.message),
+  })
 
   const saveProfile = useMutation({
     mutationFn: (patch: Record<string, unknown>) => updateProfile(userId, patch),
@@ -175,6 +210,31 @@ export default function SettingsPage() {
       </Card>
 
       <Card>
+        <CardTitle>Financial memory — tell the AI about your situation</CardTitle>
+        <p className="mb-2 text-xs text-ink-muted">
+          Brain-dump anything the AI should always know: income and payday, your debts, goals,
+          what's discretionary, quirks of your accounts. It's included in every AI conversation,
+          and you can edit or clear it any time. The AI also adds structured facts below as you
+          chat and import.
+        </p>
+        <Textarea
+          rows={6}
+          placeholder={'e.g. I get paid ~£2,600 on the 28th. Car finance with Santander, £11k left, £297/month. Voy is my monthly TRT (£49). Motorcycling spending is my hobby money. Saving for a £10k emergency fund.'}
+          value={notesValue}
+          onChange={(e) => {
+            setNotes(e.target.value)
+            setNotesMsg(null)
+          }}
+        />
+        <div className="mt-2 flex items-center gap-3">
+          <Button size="sm" onClick={() => saveNotes.mutate()} disabled={saveNotes.isPending || notes === null}>
+            {saveNotes.isPending ? 'Saving…' : 'Save memory'}
+          </Button>
+          {notesMsg && <span className="text-xs text-good">{notesMsg}</span>}
+        </div>
+      </Card>
+
+      <Card>
         <CardTitle>Remembered financial facts</CardTitle>
         {(facts ?? []).length === 0 ? (
           <p className="text-xs text-ink-faint">
@@ -182,7 +242,9 @@ export default function SettingsPage() {
           </p>
         ) : (
           <div className="space-y-1.5">
-            {(facts ?? []).map((f) => (
+            {(facts ?? [])
+              .filter((f) => !(f.fact_type === 'context' && f.fact_key === 'user_notes'))
+              .map((f) => (
               <div key={f.id} className="flex items-center justify-between gap-2 text-sm">
                 <span className="min-w-0">
                   <Badge className="mr-1.5">{f.fact_type}</Badge>
