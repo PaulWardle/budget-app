@@ -178,6 +178,23 @@ export default function SettingsPage() {
             </Select>
           </div>
           <div>
+            <Label>Your name (as it appears on bank transfers)</Label>
+            <Input
+              defaultValue={(profile.display_name as string | null) ?? ''}
+              onBlur={(e) => {
+                const v = e.target.value.trim()
+                if (v !== ((profile.display_name as string | null) ?? '')) {
+                  saveProfile.mutate({ display_name: v || null })
+                }
+              }}
+              placeholder="e.g. Paul Wardle"
+            />
+            <p className="mt-1 text-[11px] text-ink-faint">
+              Payments to or from this name are treated as moving your own money between accounts —
+              excluded from income and spending stats. Transfers to other people still count.
+            </p>
+          </div>
+          <div>
             <Label>Usual payday (day of month)</Label>
             <Input
               inputMode="numeric"
