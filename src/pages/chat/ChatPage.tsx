@@ -11,13 +11,13 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 const SUGGESTIONS = [
-  'Let me tell you about my finances…',
+  'What bills are due this week?',
+  'What are my biggest spending themes this month?',
+  'How does this month compare to last month?',
   'How much did I spend eating out last month?',
-  'That £30 payment is my monthly gym membership.',
-  'I still owe £500 on PayPal.',
-  'What bills are due before payday?',
-  'I paid an extra £100 off my loan today.',
+  'What subscriptions am I paying for?',
   'How much can I safely spend this weekend?',
+  'Where could I cut back?',
 ]
 
 export default function ChatPage() {
