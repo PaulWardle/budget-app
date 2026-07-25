@@ -90,7 +90,9 @@ export default function ChatPage() {
       const reply =
         outcome.status === 'review'
           ? `I’ve read ${outcome.extracted} transaction${outcome.extracted === 1 ? '' : 's'} from ${file.name}. Nothing is saved yet — I’m taking you to the review screen to check and confirm them.`
-          : `I couldn’t read ${file.name}: ${outcome.error ?? 'unknown error'}. Try a clearer photo or a CSV export from your bank.`
+          : outcome.status === 'processing'
+            ? `I’m reading ${file.name} now — long statements can take a few minutes. Nothing is saved without your review; I’m taking you to the review screen, which fills in as soon as I’m done.`
+            : `I couldn’t read ${file.name}: ${outcome.error ?? 'unknown error'}. Try a clearer photo or a CSV export from your bank.`
       await supabase.from('chat_messages').insert({
         user_id: userId,
         conversation_id: convId,
@@ -106,7 +108,7 @@ export default function ChatPage() {
       qc.invalidateQueries({ queryKey: ['batches'] })
     },
     onSuccess: (outcome) => {
-      if (outcome && outcome.status === 'review') navigate(`/imports/${outcome.batchId}`)
+      if (outcome && (outcome.status === 'review' || outcome.status === 'processing')) navigate(`/imports/${outcome.batchId}`)
     },
     onError: (e: Error) => setError(e.message),
   })

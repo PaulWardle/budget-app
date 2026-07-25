@@ -96,8 +96,40 @@ export default function ImportReviewPage() {
       }
       const chosen = edits.filter((e) => e.include && e.amountMinor !== null && e.date && e.description)
       const rejected = edits.filter((e) => !e.include)
+      // Second duplicate gate at save time: extraction-time checks only see
+      // transactions that were already saved, so two copies of the same
+      // statement sitting in review together would slip through. Anything
+      // whose exact hash is already in the ledger is skipped — unless the
+      // user explicitly ticked a flagged duplicate to override.
+      let existingHashes = new Set<string>()
+      if (chosen.length > 0) {
+        const dates = chosen.map((e) => e.date).sort()
+        const { data: existing } = await supabase
+          .from('transactions')
+          .select('dedupe_hash')
+          .eq('account_id', accountId)
+          .gte('date', dates[0])
+          .lte('date', dates[dates.length - 1])
+        existingHashes = new Set(
+          ((existing ?? []) as { dedupe_hash: string | null }[])
+            .map((r) => r.dedupe_hash)
+            .filter((h): h is string => !!h),
+        )
+      }
       let confirmedCount = 0
+      let skippedDuplicates = 0
       for (const e of chosen) {
+        const hash = dedupeHash({
+          accountId,
+          date: e.date,
+          amountMinor: e.amountMinor!,
+          description: e.description,
+        })
+        if (existingHashes.has(hash) && !e.duplicateOf) {
+          await supabase.from('imported_items').update({ status: 'duplicate' }).eq('id', e.id)
+          skippedDuplicates++
+          continue
+        }
         const { data: txn, error: tErr } = await supabase
           .from('transactions')
           .insert({
@@ -112,12 +144,7 @@ export default function ImportReviewPage() {
             import_batch_id: batch.id,
             confidence: e.confidence,
             needs_review: (e.confidence ?? 1) < 0.6,
-            dedupe_hash: dedupeHash({
-              accountId,
-              date: e.date,
-              amountMinor: e.amountMinor!,
-              description: e.description,
-            }),
+            dedupe_hash: hash,
             source: 'import',
           })
           .select('id')
@@ -162,7 +189,7 @@ export default function ImportReviewPage() {
             ...batch.stats,
             confirmed: confirmedCount,
             rejected: rejected.length,
-            duplicates: rejected.filter((e) => e.duplicateOf).length,
+            duplicates: rejected.filter((e) => e.duplicateOf).length + skippedDuplicates,
           },
         })
         .eq('id', batch.id)

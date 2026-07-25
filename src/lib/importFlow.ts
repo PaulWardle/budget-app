@@ -11,7 +11,7 @@ import { supabase } from '@/lib/supabase'
 
 export interface UploadOutcome {
   batchId: string
-  status: 'review' | 'failed'
+  status: 'review' | 'failed' | 'processing'
   extracted: number
   fileName: string
   error?: string
@@ -147,19 +147,30 @@ export async function processUpload(
     return { batchId: batch.id, status: 'review', extracted: items.length, fileName: file.name }
   }
 
-  // Image / PDF → AI extraction
+  // Image / PDF → AI extraction. The function replies immediately with
+  // { status: 'processing' } and finishes in the background — the imports
+  // list and review screen poll the batch until it flips to review/failed.
   const { data: session } = await supabase.auth.getSession()
   const { data, error: fnErr } = await supabase.functions.invoke('ai-extract', {
     body: { batch_id: batch.id, document_id: doc.id, account_id: accountId },
     headers: { Authorization: `Bearer ${session.session?.access_token}` },
   })
   if (fnErr) {
-    const message =
-      'AI extraction is not available. Check that the ai-extract function is deployed and ANTHROPIC_API_KEY is set (see README).'
+    // Surface the function's real error rather than a canned guess.
+    let message = 'AI extraction failed — could not reach the ai-extract function.'
+    const resp = (fnErr as { context?: unknown }).context
+    if (resp instanceof Response) {
+      const errBody = (await resp.json().catch(() => null)) as { error?: string } | null
+      if (errBody?.error) message = errBody.error
+    }
     await supabase.from('import_batches').update({ status: 'failed', error: message }).eq('id', batch.id)
     return { batchId: batch.id, status: 'failed', extracted: 0, fileName: file.name, error: message }
   }
-  const extracted = (data as { extracted?: number } | null)?.extracted ?? 0
+  const payload = data as { status?: string; extracted?: number } | null
+  if (payload?.status === 'processing') {
+    return { batchId: batch.id, status: 'processing', extracted: 0, fileName: file.name }
+  }
+  const extracted = payload?.extracted ?? 0
   return {
     batchId: batch.id,
     status: extracted > 0 ? 'review' : 'failed',

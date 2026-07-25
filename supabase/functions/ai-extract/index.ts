@@ -2,11 +2,25 @@
 // with Claude and writes PROPOSED records for user review. Nothing is saved to
 // the ledger until the user confirms on the review screen. Deterministic
 // duplicate scoring runs against the existing ledger before proposals land.
+//
+// The request returns immediately with { status: 'processing' } and the real
+// work runs as a background task (EdgeRuntime.waitUntil) — long statements can
+// take minutes and must not be bounded by the HTTP request. The UI already
+// polls the batch row for the processing → review/failed transition.
+//
+// Long statements exceed a single response's output budget, so extraction
+// streams with a high token cap and, when a pass is cut off mid-list, the
+// salvaged partial output is kept and another pass continues from the last
+// extracted transaction until the whole statement is covered.
 
 import Anthropic from 'npm:@anthropic-ai/sdk@0.65.0'
-import { corsHeaders, json, requireUser } from '../_shared/common.ts'
+import { corsHeaders, json, requireUser, type AuthedContext } from '../_shared/common.ts'
+
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 
 const MODEL = 'claude-opus-5'
+const MAX_OUTPUT_TOKENS = 32000
+const MAX_PASSES = 6
 
 const EXTRACT_TXNS_TOOL: Anthropic.Beta.BetaTool = {
   name: 'record_extracted_transactions',
@@ -80,6 +94,65 @@ function normalise(raw: string): string {
   return raw.toUpperCase().replace(/\d{2,}/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
+interface ExtractedTxn {
+  date: string
+  description: string
+  merchant?: string | null
+  amount_minor: number
+  running_balance_minor?: number | null
+  reference?: string | null
+  confidence: number
+}
+
+/** Parse tool JSON that may have been cut off by the output-token cap.
+ * Truncation lands mid-way through the transactions array, so trim back to
+ * the last complete transaction object and close the array + wrapper. */
+function salvageJson(raw: string): Record<string, unknown> | null {
+  const text = raw.trim()
+  if (!text) return null
+  try {
+    return JSON.parse(text) as Record<string, unknown>
+  } catch {
+    const cut = text.lastIndexOf('},')
+    if (cut === -1) return null
+    try {
+      return JSON.parse(`${text.slice(0, cut + 1)}]}`) as Record<string, unknown>
+    } catch {
+      return null
+    }
+  }
+}
+
+/** One streamed extraction call. Returns the (possibly salvaged) tool input
+ * and whether the response was truncated by the token cap. */
+async function streamExtract(
+  anthropic: Anthropic,
+  contentBlock: Anthropic.Beta.BetaContentBlockParam,
+  prompt: string,
+  tool: Anthropic.Beta.BetaTool,
+): Promise<{ input: Record<string, unknown> | null; truncated: boolean }> {
+  const stream = anthropic.beta.messages.stream({
+    model: MODEL,
+    max_tokens: MAX_OUTPUT_TOKENS,
+    betas: ['server-side-fallback-2026-07-01'],
+    fallbacks: 'default',
+    tools: [tool],
+    tool_choice: { type: 'tool', name: tool.name },
+    messages: [{ role: 'user', content: [contentBlock, { type: 'text', text: prompt }] }],
+  })
+  let raw = ''
+  let stopReason: string | null = null
+  for await (const event of stream) {
+    if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
+      raw += event.delta.partial_json
+    } else if (event.type === 'message_delta' && event.delta.stop_reason) {
+      stopReason = event.delta.stop_reason
+    }
+  }
+  if (stopReason === 'refusal') throw new Error('The AI declined to process this document')
+  return { input: salvageJson(raw), truncated: stopReason === 'max_tokens' }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   const auth = await requireUser(req)
@@ -99,17 +172,40 @@ Deno.serve(async (req) => {
     return json({ error: 'batch_id and document_id are required' }, 400)
   }
 
-  const fail = async (message: string, status = 400) => {
-    await ctx.supabase.from('import_batches').update({ status: 'failed', error: message }).eq('id', body.batch_id!)
-    return json({ error: message }, status)
+  const { data: doc } = await ctx.supabase.from('documents').select('*').eq('id', body.document_id).single()
+  if (!doc) {
+    await ctx.supabase.from('import_batches').update({ status: 'failed', error: 'Document not found' }).eq('id', body.batch_id)
+    return json({ error: 'Document not found' }, 404)
   }
 
-  const { data: doc } = await ctx.supabase.from('documents').select('*').eq('id', body.document_id).single()
-  if (!doc) return fail('Document not found', 404)
+  // Everything slow happens after the response: the UI polls the batch row.
+  EdgeRuntime.waitUntil(
+    runExtraction(ctx, apiKey, body as { batch_id: string; document_id: string; account_id?: string | null; kind?: string }, doc as Record<string, unknown>).catch(
+      async (e) => {
+        const message = e instanceof Error ? e.message : 'Extraction failed unexpectedly'
+        await ctx.supabase
+          .from('import_batches')
+          .update({ status: 'failed', error: `AI extraction failed: ${message}` })
+          .eq('id', body.batch_id!)
+      },
+    ),
+  )
+  return json({ status: 'processing' }, 202)
+})
+
+async function runExtraction(
+  ctx: AuthedContext,
+  apiKey: string,
+  body: { batch_id: string; document_id: string; account_id?: string | null; kind?: string },
+  doc: Record<string, unknown>,
+) {
+  const fail = async (message: string) => {
+    await ctx.supabase.from('import_batches').update({ status: 'failed', error: message }).eq('id', body.batch_id)
+  }
 
   const { data: file, error: dlErr } = await ctx.supabase.storage
     .from('documents')
-    .download((doc as { storage_path: string }).storage_path)
+    .download(doc.storage_path as string)
   if (dlErr || !file) return fail('Could not download the uploaded file')
 
   const bytes = new Uint8Array(await file.arrayBuffer())
@@ -121,44 +217,29 @@ Deno.serve(async (req) => {
   }
   b64 = btoa(b64)
 
-  const mime = (doc as { mime_type: string }).mime_type
+  const mime = doc.mime_type as string
   const isPdf = mime === 'application/pdf'
-  const isContract = (doc as { kind: string }).kind === 'contract' || body.kind === 'contract'
+  const isContract = doc.kind === 'contract' || body.kind === 'contract'
   const contentBlock: Anthropic.Beta.BetaContentBlockParam = isPdf
     ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
     : { type: 'image', source: { type: 'base64', media_type: mime as 'image/png' | 'image/jpeg', data: b64 } }
 
   const anthropic = new Anthropic({ apiKey })
-  const tool = isContract ? EXTRACT_CONTRACT_TOOL : EXTRACT_TXNS_TOOL
-  const prompt = isContract
-    ? 'Extract the loan/credit agreement terms from this document. All money values in integer pence (£1,234.56 = 123456). Use null for anything not stated — never guess. Then call record_extracted_loan_terms exactly once.'
-    : `Extract every transaction visible in this bank statement. Also identify which bank or provider the statement is from, and any account number hint shown. All amounts in integer pence; money out is NEGATIVE. Read dates carefully (UK format is day/month). Today is ${new Date().toISOString().slice(0, 10)} — infer missing years from context. Include partially-visible rows with low confidence rather than omitting them. Then call record_extracted_transactions exactly once.`
-
-  let extracted: Record<string, unknown> | null = null
-  try {
-    const response = await anthropic.beta.messages.create({
-      model: MODEL,
-      max_tokens: 16000,
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
-      tools: [tool],
-      tool_choice: { type: 'tool', name: tool.name },
-      messages: [{ role: 'user', content: [contentBlock, { type: 'text', text: prompt }] }],
-    } as Anthropic.Beta.MessageCreateParamsNonStreaming)
-    if (response.stop_reason === 'refusal') return fail('The AI declined to process this document')
-    const toolUse = response.content.find(
-      (b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use',
-    )
-    if (!toolUse) return fail('No structured data could be extracted from this file')
-    extracted = toolUse.input as Record<string, unknown>
-  } catch (e) {
-    return fail(`AI extraction failed: ${e instanceof Error ? e.message : 'unknown error'}`, 502)
-  }
 
   // ---------------------------------------------------------- contracts
   if (isContract) {
+    const prompt =
+      'Extract the loan/credit agreement terms from this document. All money values in integer pence (£1,234.56 = 123456). Use null for anything not stated — never guess. Then call record_extracted_loan_terms exactly once.'
+    let extracted: Record<string, unknown> | null = null
+    try {
+      const result = await streamExtract(anthropic, contentBlock, prompt, EXTRACT_CONTRACT_TOOL)
+      extracted = result.input
+    } catch (e) {
+      return fail(`AI extraction failed: ${e instanceof Error ? e.message : 'unknown error'}`)
+    }
+    if (!extracted) return fail('No structured data could be extracted from this file')
     const confidence = typeof extracted.confidence === 'number' ? extracted.confidence : null
-    const { data: contract, error } = await ctx.supabase
+    const { error } = await ctx.supabase
       .from('loan_contracts')
       .insert({
         user_id: ctx.userId,
@@ -167,33 +248,58 @@ Deno.serve(async (req) => {
         confidence,
         status: 'proposed',
       })
-      .select('id')
-      .single()
-    if (error) return fail(error.message, 500)
+    if (error) return fail(error.message)
     await ctx.supabase
       .from('import_batches')
       .update({ status: 'review', ai_model: MODEL, stats: { extracted: 1 } })
       .eq('id', body.batch_id)
-    return json({ contract_id: contract.id, extracted })
+    return
   }
 
   // -------------------------------------------------------- transactions
-  interface ExtractedTxn {
-    date: string
-    description: string
-    merchant?: string | null
-    amount_minor: number
-    running_balance_minor?: number | null
-    reference?: string | null
-    confidence: number
+  const basePrompt = `Extract every transaction visible in this bank statement. Also identify which bank or provider the statement is from, and any account number hint shown. All amounts in integer pence; money out is NEGATIVE. Read dates carefully (UK format is day/month). Today is ${new Date().toISOString().slice(0, 10)} — infer missing years from context. Include partially-visible rows with low confidence rather than omitting them. Work through the statement strictly in order from the first page to the last. Then call record_extracted_transactions exactly once.`
+
+  const all: ExtractedTxn[] = []
+  const seen = new Set<string>()
+  let bankName = ''
+  let passes = 0
+  try {
+    let continueFrom: ExtractedTxn | null = null
+    for (let pass = 0; pass < MAX_PASSES; pass++) {
+      passes = pass + 1
+      const prompt = continueFrom
+        ? `${basePrompt}\n\nIMPORTANT: a previous pass over this document was cut short. It already recorded every transaction up to and including this one: date ${continueFrom.date}, description "${continueFrom.description}", amount ${continueFrom.amount_minor} pence. Skip everything up to and including that transaction and record ONLY the transactions that come after it in the statement.`
+        : basePrompt
+      const { input, truncated } = await streamExtract(anthropic, contentBlock, prompt, EXTRACT_TXNS_TOOL)
+      if (!input) {
+        if (all.length === 0) return fail('No structured data could be extracted from this file')
+        break
+      }
+      if (!bankName && typeof input.bank_name === 'string') bankName = input.bank_name.trim()
+      const txns = (input.transactions ?? []) as ExtractedTxn[]
+      let added = 0
+      for (const t of txns) {
+        const key = `${t.date}|${t.amount_minor}|${(t.description ?? '').trim()}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          all.push(t)
+          added++
+        }
+      }
+      if (!truncated || added === 0) break
+      continueFrom = all[all.length - 1] ?? null
+    }
+  } catch (e) {
+    if (all.length === 0) {
+      return fail(`AI extraction failed: ${e instanceof Error ? e.message : 'unknown error'}`)
+    }
+    // Later passes failing still leaves a usable partial extraction.
   }
-  const txns = (extracted.transactions ?? []) as ExtractedTxn[]
 
   // Auto-attribute the account: if the caller didn't pick one, match the
   // extracted bank name against the user's accounts. Only a single
   // unambiguous match is used — otherwise the review screen asks.
   let accountId = body.account_id ?? null
-  const bankName = typeof extracted.bank_name === 'string' ? extracted.bank_name.trim() : ''
   if (!accountId && bankName) {
     const { data: accts } = await ctx.supabase
       .from('accounts')
@@ -211,7 +317,7 @@ Deno.serve(async (req) => {
       await ctx.supabase.from('import_batches').update({ account_id: accountId }).eq('id', body.batch_id)
     }
   }
-  const valid = txns.filter(
+  const valid = all.filter(
     (t) =>
       /^\d{4}-\d{2}-\d{2}$/.test(t.date ?? '') &&
       typeof t.description === 'string' &&
@@ -289,9 +395,10 @@ Deno.serve(async (req) => {
     }
   })
 
-  if (items.length > 0) {
-    const { error } = await ctx.supabase.from('imported_items').insert(items)
-    if (error) return fail(error.message, 500)
+  // Long statements produce thousands of rows — insert in chunks.
+  for (let i = 0; i < items.length; i += 500) {
+    const { error } = await ctx.supabase.from('imported_items').insert(items.slice(i, i + 500))
+    if (error) return fail(error.message)
   }
 
   await ctx.supabase
@@ -300,22 +407,25 @@ Deno.serve(async (req) => {
       status: items.length > 0 ? 'review' : 'failed',
       error: items.length > 0 ? null : 'No transactions could be read from this file',
       ai_model: MODEL,
-      stats: { extracted: items.length, skipped: txns.length - valid.length, ...(bankName ? { bank: bankName } : {}) },
+      stats: {
+        extracted: items.length,
+        skipped: all.length - valid.length,
+        passes,
+        ...(bankName ? { bank: bankName } : {}),
+      },
     })
     .eq('id', body.batch_id)
 
   // Document retention preference
   const { data: profile } = await ctx.supabase.from('profiles').select('document_retention').single()
   if ((profile as { document_retention: string } | null)?.document_retention === 'delete' && items.length > 0) {
-    await ctx.supabase.storage.from('documents').remove([(doc as { storage_path: string }).storage_path])
+    await ctx.supabase.storage.from('documents').remove([doc.storage_path as string])
     await ctx.supabase
       .from('documents')
       .update({ status: 'deleted', deleted_at: new Date().toISOString() })
       .eq('id', body.document_id)
   }
-
-  return json({ extracted: items.length, skipped: txns.length - valid.length })
-})
+}
 
 function shiftDays(iso: string, days: number): string {
   const d = new Date(`${iso}T00:00:00Z`)
