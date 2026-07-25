@@ -1,7 +1,7 @@
 import { AccountSelect, CategorySelect, ConfidenceBadge, MoneyInput, PageHeader } from '@/components/shared/common'
 import { Badge, Button, Card, Input, Spinner } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchAccounts, fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, recordAudit, updateAccount } from '@/lib/api'
+import { fetchAccounts, fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, recordAudit, syncRecurringFromLedger, updateAccount } from '@/lib/api'
 import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
 import { dedupeHash } from '@/lib/engine/duplicates'
 import { formatDate, money } from '@/lib/format'
@@ -185,16 +185,23 @@ export default function ImportReviewPage() {
           .eq('id', e.id)
       }
       // Statements carry the account's actual balance — feed it into Wealth.
-      // Only move the balance forward: an old statement never overwrites a
-      // balance that was updated more recently.
-      const acct = (accounts ?? []).find((a) => a.id === accountId)
-      if (
-        latestBalance &&
-        acct &&
-        latestBalance.date >= acct.balance_updated_at.slice(0, 10) &&
-        acct.balance_minor !== latestBalance.balanceMinor
-      ) {
-        await updateAccount(userId, accountId, { balance_minor: latestBalance.balanceMinor }, 'import').catch(() => {})
+      // Take the newest running balance across the WHOLE ledger for this
+      // account, not just this batch, so uploading statements out of order
+      // still leaves the most recent balance in place.
+      if (latestBalance) {
+        const { data: newest } = await supabase
+          .from('transactions')
+          .select('running_balance_minor')
+          .eq('account_id', accountId)
+          .not('running_balance_minor', 'is', null)
+          .order('date', { ascending: false })
+          .order('created_at', { ascending: false })
+          .limit(1)
+        const balanceMinor = (newest?.[0] as { running_balance_minor: number } | undefined)?.running_balance_minor
+        const acct = (accounts ?? []).find((a) => a.id === accountId)
+        if (balanceMinor != null && acct && acct.balance_minor !== balanceMinor) {
+          await updateAccount(userId, accountId, { balance_minor: balanceMinor }, 'import').catch(() => {})
+        }
       }
       await supabase
         .from('import_batches')
@@ -214,12 +221,18 @@ export default function ImportReviewPage() {
         next: { confirmed: confirmedCount, rejected: rejected.length }, source: 'import', undoable: true,
         importBatchId: batch.id,
       })
+      // Turn the new history into known bills so Home, Cashflow and Bills
+      // have something to show without any extra steps.
+      await syncRecurringFromLedger(userId).catch(() => {})
       return confirmedCount
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['transactions'] })
       qc.invalidateQueries({ queryKey: ['batches'] })
       qc.invalidateQueries({ queryKey: ['budget'] })
+      qc.invalidateQueries({ queryKey: ['accounts'] })
+      qc.invalidateQueries({ queryKey: ['recurring'] })
+      qc.invalidateQueries({ queryKey: ['networth'] })
       navigate('/imports')
     },
     onError: (e: Error) => setError(e.message),

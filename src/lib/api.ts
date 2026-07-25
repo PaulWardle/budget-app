@@ -3,6 +3,8 @@
 import { supabase } from '@/lib/supabase'
 import { todayIso } from '@/lib/format'
 import { computeNetWorth, type NetWorthItem } from '@/lib/engine/networth'
+import { ruleMatches, type MatchType } from '@/lib/engine/rules'
+import { detectRecurring, normaliseDescription } from '@/lib/engine/recurring'
 import {
   LIABILITY_ACCOUNT_TYPES,
   LIQUID_ACCOUNT_TYPES,
@@ -227,21 +229,17 @@ export async function fetchRules(): Promise<CategorisationRule[]> {
   return (data ?? []) as CategorisationRule[]
 }
 
-/** Apply learned rules to a raw bank description. */
+/** Apply learned rules to a raw bank description. Longer matchers win, so a
+ * specific rule beats a generic one regardless of insertion order. */
 export function applyRules(
   description: string,
   rules: CategorisationRule[],
 ): { merchantId: string | null; categoryId: string | null } | null {
-  const hay = description.toUpperCase()
-  for (const r of rules) {
-    const needle = r.matcher.toUpperCase()
-    const hit =
-      r.match_type === 'exact'
-        ? hay === needle
-        : r.match_type === 'starts_with'
-          ? hay.startsWith(needle)
-          : hay.includes(needle)
-    if (hit) return { merchantId: r.merchant_id, categoryId: r.category_id }
+  const ordered = [...rules].sort((a, b) => b.matcher.length - a.matcher.length)
+  for (const r of ordered) {
+    if (ruleMatches(description, r.matcher, r.match_type as MatchType)) {
+      return { merchantId: r.merchant_id, categoryId: r.category_id }
+    }
   }
   return null
 }
@@ -282,6 +280,21 @@ export async function learnMerchant(
     await supabase
       .from('merchant_aliases')
       .upsert({ user_id: userId, merchant_id: merchant.id, alias: pattern.toUpperCase() }, { onConflict: 'user_id,alias' })
+    // Re-teaching the same merchant must not stack duplicate rules.
+    const { data: existingRule } = await supabase
+      .from('categorisation_rules')
+      .select('id')
+      .eq('matcher', pattern.toUpperCase())
+      .eq('match_type', 'contains')
+      .maybeSingle()
+    if (existingRule) {
+      await supabase
+        .from('categorisation_rules')
+        .update({ merchant_id: merchant.id, category_id: input.categoryId, is_active: true })
+        .eq('id', (existingRule as { id: string }).id)
+      ruleIds.push((existingRule as { id: string }).id)
+      continue
+    }
     const { data: rule, error } = await supabase
       .from('categorisation_rules')
       .insert({
@@ -300,12 +313,22 @@ export async function learnMerchant(
 
   let updatedPastCount = 0
   if (input.applyToPast) {
+    // Fetch candidates, then filter with the word-boundary matcher so a short
+    // pattern can't recategorise unrelated transactions.
     for (const pattern of input.aliasPatterns) {
+      const { data: candidates } = await supabase
+        .from('transactions')
+        .select('id,description,merchant_name')
+        .or(`description.ilike.%${pattern}%,merchant_name.ilike.%${pattern}%`)
+        .is('category_id', null)
+      const ids = ((candidates ?? []) as { id: string; description: string; merchant_name: string | null }[])
+        .filter((t) => ruleMatches(`${t.merchant_name ?? ''} ${t.description}`, pattern))
+        .map((t) => t.id)
+      if (ids.length === 0) continue
       const { data: updated } = await supabase
         .from('transactions')
         .update({ merchant_id: merchant.id, merchant_name: merchant.name, category_id: input.categoryId })
-        .ilike('description', `%${pattern}%`)
-        .is('category_id', null)
+        .in('id', ids)
         .select('id')
       updatedPastCount += updated?.length ?? 0
     }
@@ -539,6 +562,57 @@ export async function upsertRecurring(
   throwIf(error)
   await recordAudit({ userId, recordType: 'recurring_payment', recordId: data!.id, action: 'insert', next: input, undoable: true })
   return data as RecurringPayment
+}
+
+/** Detect recurring bills from the saved ledger and record them, linking the
+ * transactions that belong to each one. Detected entries are flagged
+ * `needs_confirmation` so the user can confirm or dismiss them in Bills — but
+ * they populate Home, Cashflow and the bills list straight after an import
+ * instead of leaving those screens empty until someone confirms by hand. */
+export async function syncRecurringFromLedger(userId: string): Promise<number> {
+  const from = new Date()
+  from.setMonth(from.getMonth() - 8)
+  const [txns, existing] = await Promise.all([
+    fetchTransactions({ from: from.toISOString().slice(0, 10), limit: 3000 }),
+    fetchRecurring(),
+  ])
+  const known = new Set(
+    existing.flatMap((r) => [r.name.toUpperCase(), (r.notes ?? '').toUpperCase()]).filter(Boolean),
+  )
+  const candidates = detectRecurring(
+    txns
+      .filter((t) => !t.is_transfer && !t.recurring_payment_id)
+      .map((t) => ({ date: t.date, amountMinor: t.amount_minor, description: t.description })),
+  ).filter((c) => c.confidence >= 0.7 && !known.has(c.key))
+
+  let created = 0
+  for (const c of candidates) {
+    const row = await upsertRecurring(userId, {
+      name: c.key
+        .toLowerCase()
+        .split(' ')
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' '),
+      kind: c.averageAmountMinor > 0 ? 'income' : 'bill',
+      amount_minor: c.averageAmountMinor,
+      frequency: c.frequency,
+      next_due_date: c.nextExpectedDate,
+      source: 'detected',
+      confidence: c.confidence,
+      needs_confirmation: true,
+      notes: c.key,
+    }).catch(() => null)
+    if (!row) continue
+    created++
+    // Link the transactions this bill is made of, so "bills paid" is real.
+    const ids = txns
+      .filter((t) => !t.recurring_payment_id && normaliseDescription(t.description) === c.key)
+      .map((t) => t.id)
+    if (ids.length > 0) {
+      await supabase.from('transactions').update({ recurring_payment_id: row.id }).in('id', ids)
+    }
+  }
+  return created
 }
 
 // ------------------------------------------------------------------- debts
