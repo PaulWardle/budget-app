@@ -14,7 +14,7 @@ import {
 import { formatDate, formatDateTime } from '@/lib/format'
 import { supabase } from '@/lib/supabase'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Download, Plus } from 'lucide-react'
+import { Check, Download, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 
 export default function SettingsPage() {
@@ -99,11 +99,44 @@ export default function SettingsPage() {
     },
   })
 
-  const archiveCategory = useMutation({
-    mutationFn: async (id: string) => {
-      await supabase.from('categories').update({ is_archived: true }).eq('id', id)
+  const [editingCat, setEditingCat] = useState<{ id: string; name: string } | null>(null)
+  const [catMsg, setCatMsg] = useState<string | null>(null)
+
+  const renameCategory = useMutation({
+    mutationFn: async (p: { id: string; name: string }) => {
+      const { error } = await supabase.from('categories').update({ name: p.name.trim() }).eq('id', p.id)
+      if (error) throw new Error(error.message)
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['categories'] }),
+    onSuccess: () => {
+      setEditingCat(null)
+      qc.invalidateQueries({ queryKey: ['categories'] })
+    },
+    onError: (e: Error) => setCatMsg(e.message),
+  })
+
+  // Unused categories are deleted outright. A category with transactions is
+  // archived instead — it disappears from pickers but history keeps its label.
+  const removeCategory = useMutation({
+    mutationFn: async (id: string) => {
+      const ids = [id, ...(categories ?? []).filter((c) => c.parent_id === id).map((c) => c.id)]
+      const { count } = await supabase
+        .from('transactions')
+        .select('id', { count: 'exact', head: true })
+        .in('category_id', ids)
+      if ((count ?? 0) > 0) {
+        const { error } = await supabase.from('categories').update({ is_archived: true }).in('id', ids)
+        if (error) throw new Error(error.message)
+        return `Archived — ${count} transaction${count === 1 ? '' : 's'} keep the label but it's hidden from pickers`
+      }
+      const { error } = await supabase.from('categories').delete().in('id', ids)
+      if (error) throw new Error(error.message)
+      return 'Deleted'
+    },
+    onSuccess: (msg) => {
+      setCatMsg(msg)
+      qc.invalidateQueries({ queryKey: ['categories'] })
+    },
+    onError: (e: Error) => setCatMsg(e.message),
   })
 
   const removeFact = useMutation({
@@ -171,21 +204,69 @@ export default function SettingsPage() {
 
       <Card>
         <CardTitle>Categories</CardTitle>
-        <div className="mb-3 flex flex-wrap gap-1.5">
+        <p className="mb-2 text-xs text-ink-muted">
+          Rename with the pencil, remove with the bin. Removing a category that's in use archives
+          it (past transactions keep their label); an unused one is deleted outright.
+        </p>
+        {catMsg && <p className="mb-2 text-xs text-accent">{catMsg}</p>}
+        <div className="mb-3 divide-y divide-border">
           {(categories ?? [])
             .filter((c) => !c.parent_id)
-            .map((c) => (
-              <Badge key={c.id} className="group">
-                {c.name}
-                <button
-                  className="ml-1 hidden text-bad group-hover:inline cursor-pointer"
-                  onClick={() => archiveCategory.mutate(c.id)}
-                  aria-label={`Archive ${c.name}`}
-                >
-                  ×
-                </button>
-              </Badge>
-            ))}
+            .map((parent) => {
+              const subs = (categories ?? []).filter((c) => c.parent_id === parent.id)
+              const row = (c: { id: string; name: string }, isSub: boolean) =>
+                editingCat?.id === c.id ? (
+                  <span key={c.id} className="flex items-center gap-1">
+                    <Input
+                      autoFocus
+                      className="h-7 w-40 text-xs"
+                      value={editingCat.name}
+                      onChange={(e) => setEditingCat({ id: c.id, name: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && editingCat.name.trim()) renameCategory.mutate(editingCat)
+                        if (e.key === 'Escape') setEditingCat(null)
+                      }}
+                    />
+                    <button
+                      className="text-good"
+                      onClick={() => editingCat.name.trim() && renameCategory.mutate(editingCat)}
+                      aria-label="Save name"
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                    </button>
+                    <button className="text-ink-faint" onClick={() => setEditingCat(null)} aria-label="Cancel">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </span>
+                ) : (
+                  <span
+                    key={c.id}
+                    className={`group inline-flex items-center gap-1 ${isSub ? 'rounded-full border border-border px-2 py-0.5 text-[11px] text-ink-muted' : 'text-sm font-medium'}`}
+                  >
+                    {c.name}
+                    <button
+                      className="text-ink-faint hover:text-accent"
+                      onClick={() => setEditingCat({ id: c.id, name: c.name })}
+                      aria-label={`Rename ${c.name}`}
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                    <button
+                      className="text-ink-faint hover:text-bad"
+                      onClick={() => removeCategory.mutate(c.id)}
+                      aria-label={`Remove ${c.name}`}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </span>
+                )
+              return (
+                <div key={parent.id} className="flex flex-wrap items-center gap-2 py-1.5">
+                  {row(parent, false)}
+                  {subs.map((s) => row(s, true))}
+                </div>
+              )
+            })}
         </div>
         <div className="flex gap-2">
           <Input
