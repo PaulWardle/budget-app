@@ -45,6 +45,56 @@ function titleCaseKey(s: string): string {
   return s.toLowerCase().split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 }
 
+// ------------------------------------------------------- date range presets
+const PRESETS = [
+  { key: 'week', label: 'This week' },
+  { key: 'month', label: 'This month' },
+  { key: 'prev', label: 'Last month' },
+  { key: 'quarter', label: 'This quarter' },
+  { key: 'prevq', label: 'Last quarter' },
+  { key: 'ytd', label: 'Year to date' },
+  { key: '12m', label: '12 months' },
+  { key: 'all', label: 'All time' },
+] as const
+
+function presetRange(key: string): { from?: string; to?: string } {
+  const now = new Date()
+  const iso = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const today = iso(now)
+  switch (key) {
+    case 'week': {
+      const d = new Date(now)
+      d.setDate(d.getDate() - ((d.getDay() + 6) % 7)) // back to Monday
+      return { from: iso(d), to: today }
+    }
+    case 'month':
+      return { from: iso(new Date(now.getFullYear(), now.getMonth(), 1)), to: today }
+    case 'prev':
+      return {
+        from: iso(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
+        to: iso(new Date(now.getFullYear(), now.getMonth(), 0)),
+      }
+    case 'quarter': {
+      const q = Math.floor(now.getMonth() / 3) * 3
+      return { from: iso(new Date(now.getFullYear(), q, 1)), to: today }
+    }
+    case 'prevq': {
+      const q = Math.floor(now.getMonth() / 3) * 3
+      return {
+        from: iso(new Date(now.getFullYear(), q - 3, 1)),
+        to: iso(new Date(now.getFullYear(), q, 0)),
+      }
+    }
+    case 'ytd':
+      return { from: `${now.getFullYear()}-01-01`, to: today }
+    case '12m':
+      return { from: iso(new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())), to: today }
+    default:
+      return { from: undefined, to: undefined }
+  }
+}
+
 export default function TransactionsPage() {
   const userId = useUserId()
   const qc = useQueryClient()
@@ -61,12 +111,27 @@ export default function TransactionsPage() {
     importBatchId: params.get('batch') ?? undefined,
     duplicatesOnly: params.get('duplicates') === '1' || undefined,
   })
-  const [filters, setFilters] = useState<TxnFilters & { duplicatesOnly?: boolean }>(filtersFromParams)
+  // Default to current-month stats. Links that bring their own scope (a date
+  // range, the uncategorised/duplicates views, a batch) keep it instead.
+  const defaultPresetFor = (f: TxnFilters & { duplicatesOnly?: boolean }): string =>
+    f.from || f.to ? 'custom' : f.uncategorised || f.duplicatesOnly || f.importBatchId ? 'all' : 'month'
+  const [preset, setPreset] = useState<string>(() => defaultPresetFor(filtersFromParams()))
+  const [filters, setFilters] = useState<TxnFilters & { duplicatesOnly?: boolean }>(() => {
+    const f = filtersFromParams()
+    return defaultPresetFor(f) === 'month' ? { ...f, ...presetRange('month') } : f
+  })
   // Keep filters in sync when arriving via a link (e.g. from Data Quality)
   useEffect(() => {
-    setFilters(filtersFromParams())
+    const f = filtersFromParams()
+    const p = defaultPresetFor(f)
+    setPreset(p)
+    setFilters(p === 'month' ? { ...f, ...presetRange('month') } : f)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params])
+  const pickPreset = (key: string) => {
+    setPreset(key)
+    setFilters({ ...filters, ...presetRange(key) })
+  }
   const [editing, setEditing] = useState<Transaction | null>(null)
   const [adding, setAdding] = useState(false)
 
@@ -77,7 +142,7 @@ export default function TransactionsPage() {
       ...filters,
       duplicatesOnly: undefined,
       search: search || undefined,
-      limit: filters.duplicatesOnly || filters.uncategorised ? 3000 : undefined,
+      limit: 3000, // header totals must cover the whole selected range
     }),
     [filters, search],
   )
@@ -182,7 +247,10 @@ export default function TransactionsPage() {
     <div>
       <PageHeader
         title="Transactions"
-        sub={`${totals.count} shown · out ${money(totals.out)} · in ${money(totals.inn)}`}
+        sub={`${
+          PRESETS.find((p) => p.key === preset)?.label ??
+          (filters.from || filters.to ? `${filters.from ?? '…'} → ${filters.to ?? 'today'}` : 'All time')
+        } · ${totals.count} transactions · out ${money(totals.out)} · in ${money(totals.inn)}`}
         actions={
           <>
             <Button variant="outline" onClick={() => setShowFilters((v) => !v)}>
@@ -194,6 +262,22 @@ export default function TransactionsPage() {
           </>
         }
       />
+
+      <div className="mb-3 flex gap-1.5 overflow-x-auto pb-1">
+        {PRESETS.map((p) => (
+          <button
+            key={p.key}
+            onClick={() => pickPreset(p.key)}
+            className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+              preset === p.key
+                ? 'grad-accent text-white'
+                : 'border border-border bg-surface text-ink-muted hover:text-ink'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
 
       <Input
         placeholder="Search description, merchant or notes…"
@@ -226,7 +310,10 @@ export default function TransactionsPage() {
             <Input
               type="date"
               value={filters.from ?? ''}
-              onChange={(e) => setFilters({ ...filters, from: e.target.value || undefined })}
+              onChange={(e) => {
+                setPreset('custom')
+                setFilters({ ...filters, from: e.target.value || undefined })
+              }}
             />
           </div>
           <div>
@@ -234,7 +321,10 @@ export default function TransactionsPage() {
             <Input
               type="date"
               value={filters.to ?? ''}
-              onChange={(e) => setFilters({ ...filters, to: e.target.value || undefined })}
+              onChange={(e) => {
+                setPreset('custom')
+                setFilters({ ...filters, to: e.target.value || undefined })
+              }}
             />
           </div>
           <div>
