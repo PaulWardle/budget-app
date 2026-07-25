@@ -14,7 +14,7 @@ import {
 import { formatDate, formatDateTime } from '@/lib/format'
 import { supabase } from '@/lib/supabase'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, Download, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { Check, Download, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 
 export default function SettingsPage() {
@@ -206,83 +206,90 @@ export default function SettingsPage() {
       <Card>
         <CardTitle>Categories</CardTitle>
         <p className="mb-2 text-xs text-ink-muted">
-          Tap a category to rename it, remove it or manage its subcategories. Removing one that's
+          Pick a category to rename it, remove it or manage its subcategories. Removing one that's
           in use archives it (past transactions keep their label); an unused one is deleted.
         </p>
         {catMsg && <p className="mb-2 text-xs text-accent">{catMsg}</p>}
-        <div className="mb-3 divide-y divide-border rounded-xl border border-border">
+        <Select
+          className="mb-2"
+          value={expandedCat ?? ''}
+          onChange={(e) => {
+            setExpandedCat(e.target.value || null)
+            setEditingCat(null)
+            setCatMsg(null)
+          }}
+        >
+          <option value="">Choose a category to manage…</option>
           {(categories ?? [])
             .filter((c) => !c.parent_id)
-            .map((parent) => {
-              const subs = (categories ?? []).filter((c) => c.parent_id === parent.id)
-              const open = expandedCat === parent.id
-              const editRow = (c: { id: string; name: string }, isSub: boolean) => (
-                <div key={c.id} className="flex items-center justify-between gap-2 py-1">
-                  {editingCat?.id === c.id ? (
-                    <span className="flex flex-1 items-center gap-1.5">
-                      <Input
-                        autoFocus
-                        className="h-8 text-sm"
-                        value={editingCat.name}
-                        onChange={(e) => setEditingCat({ id: c.id, name: e.target.value })}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && editingCat.name.trim()) renameCategory.mutate(editingCat)
-                          if (e.key === 'Escape') setEditingCat(null)
-                        }}
-                      />
-                      <Button size="sm" variant="secondary" onClick={() => editingCat.name.trim() && renameCategory.mutate(editingCat)}>
-                        <Check className="h-3.5 w-3.5" /> Save
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setEditingCat(null)}>
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                    </span>
-                  ) : (
-                    <>
-                      <span className={isSub ? 'text-sm text-ink-muted' : 'text-sm font-medium'}>
-                        {isSub ? `↳ ${c.name}` : c.name}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Button size="sm" variant="ghost" onClick={() => setEditingCat({ id: c.id, name: c.name })}>
-                          <Pencil className="h-3.5 w-3.5" /> Rename
-                        </Button>
-                        <Button size="sm" variant="ghost" className="text-bad" onClick={() => removeCategory.mutate(c.id)}>
-                          <Trash2 className="h-3.5 w-3.5" /> Remove
-                        </Button>
-                      </span>
-                    </>
-                  )}
-                </div>
-              )
+            .map((p) => {
+              const subs = (categories ?? []).filter((c) => c.parent_id === p.id)
               return (
-                <div key={parent.id}>
-                  <button
-                    className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium hover:bg-surface-2"
-                    onClick={() => {
-                      setExpandedCat(open ? null : parent.id)
-                      setEditingCat(null)
-                    }}
-                  >
-                    <span>
-                      {parent.name}
-                      {subs.length > 0 && (
-                        <span className="ml-2 text-[11px] font-normal text-ink-faint">
-                          {subs.map((s) => s.name).join(' · ')}
-                        </span>
-                      )}
-                    </span>
-                    <ChevronDown className={`h-4 w-4 text-ink-faint transition-transform ${open ? 'rotate-180' : ''}`} />
-                  </button>
-                  {open && (
-                    <div className="border-t border-border bg-surface-2/50 px-3 py-2">
-                      {editRow(parent, false)}
-                      {subs.map((s) => editRow(s, true))}
-                    </div>
-                  )}
-                </div>
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                  {subs.length > 0 ? ` (${subs.map((s) => s.name).join(', ')})` : ''}
+                </option>
               )
             })}
-        </div>
+        </Select>
+        {expandedCat &&
+          (() => {
+            const parent = (categories ?? []).find((c) => c.id === expandedCat)
+            if (!parent) return null
+            const subs = (categories ?? []).filter((c) => c.parent_id === parent.id)
+            const editRow = (c: { id: string; name: string }, isSub: boolean) => (
+              <div key={c.id} className="flex items-center justify-between gap-2 py-1">
+                {editingCat?.id === c.id ? (
+                  <span className="flex flex-1 items-center gap-1.5">
+                    <Input
+                      autoFocus
+                      className="h-8 text-sm"
+                      value={editingCat.name}
+                      onChange={(e) => setEditingCat({ id: c.id, name: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && editingCat.name.trim()) renameCategory.mutate(editingCat)
+                        if (e.key === 'Escape') setEditingCat(null)
+                      }}
+                    />
+                    <Button size="sm" variant="secondary" onClick={() => editingCat.name.trim() && renameCategory.mutate(editingCat)}>
+                      <Check className="h-3.5 w-3.5" /> Save
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setEditingCat(null)}>
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </span>
+                ) : (
+                  <>
+                    <span className={isSub ? 'text-sm text-ink-muted' : 'text-sm font-medium'}>
+                      {isSub ? `↳ ${c.name}` : c.name}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Button size="sm" variant="ghost" onClick={() => setEditingCat({ id: c.id, name: c.name })}>
+                        <Pencil className="h-3.5 w-3.5" /> Rename
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-bad"
+                        onClick={() => {
+                          if (!isSub) setExpandedCat(null)
+                          removeCategory.mutate(c.id)
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" /> Remove
+                      </Button>
+                    </span>
+                  </>
+                )}
+              </div>
+            )
+            return (
+              <div className="mb-3 rounded-xl border border-border bg-surface-2/50 px-3 py-2">
+                {editRow(parent, false)}
+                {subs.map((s) => editRow(s, true))}
+              </div>
+            )
+          })()}
         <div className="flex gap-2">
           <Input
             placeholder="New category or subcategory name"
