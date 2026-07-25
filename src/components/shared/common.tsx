@@ -1,8 +1,11 @@
-import { Badge, Input, Select } from '@/components/ui/primitives'
+import { Badge, Button, Input, Select } from '@/components/ui/primitives'
+import { useUserId } from '@/context/AuthContext'
 import { money } from '@/lib/format'
 import { parseToMinor } from '@/lib/engine/money'
+import { supabase } from '@/lib/supabase'
 import { cn } from '@/lib/utils'
 import type { Account, Category } from '@/types/domain'
+import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState, type ReactNode } from 'react'
 
 export function PageHeader({
@@ -112,17 +115,86 @@ export function CategorySelect({
   value,
   onChange,
   allowNone = true,
+  allowCreate = true,
   id,
 }: {
   categories: Category[]
   value: string | null
   onChange: (id: string | null) => void
   allowNone?: boolean
+  allowCreate?: boolean
   id?: string
 }) {
+  const userId = useUserId()
+  const qc = useQueryClient()
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newParent, setNewParent] = useState('')
+  const [saving, setSaving] = useState(false)
   const parents = categories.filter((c) => !c.parent_id)
+
+  const create = async () => {
+    if (!newName.trim() || saving) return
+    setSaving(true)
+    const { data, error } = await supabase
+      .from('categories')
+      .insert({ user_id: userId, name: newName.trim(), parent_id: newParent || null, kind: 'expense' })
+      .select('id')
+      .single()
+    setSaving(false)
+    if (!error && data) {
+      qc.invalidateQueries({ queryKey: ['categories'] })
+      onChange(data.id as string)
+      setCreating(false)
+      setNewName('')
+      setNewParent('')
+    }
+  }
+
+  if (creating) {
+    return (
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Input
+          autoFocus
+          className="h-9 w-36"
+          placeholder="New category name"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void create()
+            if (e.key === 'Escape') setCreating(false)
+          }}
+        />
+        <Select className="h-9 w-32" value={newParent} onChange={(e) => setNewParent(e.target.value)}>
+          <option value="">Top level</option>
+          {parents.map((p) => (
+            <option key={p.id} value={p.id}>
+              under {p.name}
+            </option>
+          ))}
+        </Select>
+        <Button size="sm" variant="secondary" disabled={!newName.trim() || saving} onClick={() => void create()}>
+          {saving ? '…' : 'Add'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setCreating(false)}>
+          Cancel
+        </Button>
+      </div>
+    )
+  }
+
   return (
-    <Select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value || null)}>
+    <Select
+      id={id}
+      value={value ?? ''}
+      onChange={(e) => {
+        if (e.target.value === '__create__') {
+          setCreating(true)
+          return
+        }
+        onChange(e.target.value || null)
+      }}
+    >
       {allowNone && <option value="">Uncategorised</option>}
       {parents.map((p) => {
         const children = categories.filter((c) => c.parent_id === p.id)
@@ -137,6 +209,7 @@ export function CategorySelect({
           </optgroup>
         )
       })}
+      {allowCreate && <option value="__create__">＋ Create new category…</option>}
     </Select>
   )
 }
