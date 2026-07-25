@@ -88,14 +88,20 @@ export function detectRecurring(txns: TxnLike[]): RecurringCandidate[] {
     }
     const meanInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length
 
+    // Take the closest-fitting frequency, not the first one whose tolerance
+    // window happens to contain the mean. Monthly bills average ~30.4 days,
+    // which also falls inside four-weekly's 28±2 window — first-match order
+    // would file every monthly bill as four-weekly and over-count it by one
+    // payment a year.
     let best: (typeof FREQUENCIES)[number] | null = null
+    let bestError = Infinity
     for (const f of FREQUENCIES) {
-      if (Math.abs(meanInterval - f.days) <= f.tolerance) {
-        const consistent = intervals.every((iv) => Math.abs(iv - f.days) <= f.tolerance * 2)
-        if (consistent) {
-          best = f
-          break
-        }
+      if (Math.abs(meanInterval - f.days) > f.tolerance) continue
+      if (!intervals.every((iv) => Math.abs(iv - f.days) <= f.tolerance * 2)) continue
+      const error = Math.abs(meanInterval - f.days) / f.days
+      if (error < bestError) {
+        best = f
+        bestError = error
       }
     }
     if (!best) continue

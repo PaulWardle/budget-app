@@ -36,6 +36,22 @@ describe('detectRecurring', () => {
     expect(c.nextExpectedDate).toBe('2026-04-27')
   })
 
+  it('files a bill taken on the 1st of each month as monthly, not four-weekly', () => {
+    // ~30.4-day mean also sits inside four-weekly's 28±2 window, so the
+    // closest fit has to win rather than whichever frequency is checked first.
+    const txns = [
+      { date: '2026-01-02', amountMinor: -163279, description: 'LEEK MTG' },
+      { date: '2026-02-02', amountMinor: -163279, description: 'LEEK MTG' },
+      { date: '2026-03-02', amountMinor: -163279, description: 'LEEK MTG' },
+      { date: '2026-04-01', amountMinor: -163279, description: 'LEEK MTG' },
+      { date: '2026-05-01', amountMinor: -163279, description: 'LEEK MTG' },
+      { date: '2026-06-01', amountMinor: -163279, description: 'LEEK MTG' },
+      { date: '2026-07-01', amountMinor: -163279, description: 'LEEK MTG' },
+    ]
+    const [c] = detectRecurring(txns)
+    expect(c.frequency).toBe('monthly')
+  })
+
   it('detects annual subscriptions', () => {
     const txns = [
       { date: '2024-06-10', amountMinor: -7999, description: 'AMAZON PRIME' },

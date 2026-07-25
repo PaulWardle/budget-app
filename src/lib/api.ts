@@ -543,6 +543,37 @@ export async function fetchRecurring(): Promise<RecurringPayment[]> {
   return (data ?? []) as RecurringPayment[]
 }
 
+export interface DismissedRecurring {
+  id: string
+  match_key: string
+  label: string
+  created_at: string
+}
+
+/** Candidates the user has said are not bills. Detection re-runs over the whole
+ * ledger each time, so a rejection has to be remembered or it comes straight
+ * back. */
+export async function fetchDismissedRecurring(): Promise<DismissedRecurring[]> {
+  const { data, error } = await supabase
+    .from('dismissed_recurring')
+    .select('*')
+    .order('created_at', { ascending: false })
+  throwIf(error)
+  return (data ?? []) as DismissedRecurring[]
+}
+
+export async function dismissRecurring(userId: string, matchKey: string, label: string): Promise<void> {
+  const { error } = await supabase
+    .from('dismissed_recurring')
+    .upsert({ user_id: userId, match_key: matchKey, label }, { onConflict: 'user_id,match_key' })
+  throwIf(error)
+}
+
+export async function restoreRecurring(id: string): Promise<void> {
+  const { error } = await supabase.from('dismissed_recurring').delete().eq('id', id)
+  throwIf(error)
+}
+
 export async function upsertRecurring(
   userId: string,
   input: Partial<RecurringPayment> & { name: string; amount_minor: number; frequency: RecurringPayment['frequency']; next_due_date: string },
@@ -572,18 +603,20 @@ export async function upsertRecurring(
 export async function syncRecurringFromLedger(userId: string): Promise<number> {
   const from = new Date()
   from.setMonth(from.getMonth() - 8)
-  const [txns, existing] = await Promise.all([
+  const [txns, existing, dismissed] = await Promise.all([
     fetchTransactions({ from: from.toISOString().slice(0, 10), limit: 3000 }),
     fetchRecurring(),
+    fetchDismissedRecurring().catch(() => [] as DismissedRecurring[]),
   ])
   const known = new Set(
     existing.flatMap((r) => [r.name.toUpperCase(), (r.notes ?? '').toUpperCase()]).filter(Boolean),
   )
+  const rejected = new Set(dismissed.map((d) => d.match_key))
   const candidates = detectRecurring(
     txns
       .filter((t) => !t.is_transfer && !t.recurring_payment_id)
       .map((t) => ({ date: t.date, amountMinor: t.amount_minor, description: t.description })),
-  ).filter((c) => c.confidence >= 0.7 && !known.has(c.key))
+  ).filter((c) => c.confidence >= 0.7 && !known.has(c.key) && !rejected.has(c.key))
 
   let created = 0
   for (const c of candidates) {

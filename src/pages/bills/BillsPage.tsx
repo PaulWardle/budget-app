@@ -13,7 +13,16 @@ import {
   Switch,
 } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchAccounts, fetchCategories, fetchRecurring, fetchTransactions, upsertRecurring } from '@/lib/api'
+import {
+  dismissRecurring,
+  fetchAccounts,
+  fetchCategories,
+  fetchDismissedRecurring,
+  fetchRecurring,
+  fetchTransactions,
+  restoreRecurring,
+  upsertRecurring,
+} from '@/lib/api'
 import { detectRecurring, type RecurringCandidate } from '@/lib/engine/recurring'
 import { formatDate, money } from '@/lib/format'
 import { supabase } from '@/lib/supabase'
@@ -49,21 +58,27 @@ export default function BillsPage() {
     queryKey: ['transactions', 'history', historyFrom],
     queryFn: () => fetchTransactions({ from: historyFrom, limit: 3000 }),
   })
+  const { data: dismissed } = useQuery({
+    queryKey: ['dismissed-recurring'],
+    queryFn: fetchDismissedRecurring,
+  })
   const [editing, setEditing] = useState<Partial<RecurringPayment> | null>(null)
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['recurring'] })
+  const invalidateDismissed = () => qc.invalidateQueries({ queryKey: ['dismissed-recurring'] })
 
   const candidates = useMemo(() => {
     if (!txns || !recurring) return []
     const known = new Set(
       recurring.map((r) => r.name.toUpperCase()).concat(recurring.map((r) => (r.notes ?? '').toUpperCase())),
     )
+    const rejected = new Set((dismissed ?? []).map((d) => d.match_key))
     return detectRecurring(
       txns
         .filter((t) => !t.is_transfer && !t.recurring_payment_id)
         .map((t) => ({ date: t.date, amountMinor: t.amount_minor, description: t.description })),
-    ).filter((c) => !known.has(c.key) && c.confidence >= 0.55)
-  }, [txns, recurring])
+    ).filter((c) => !known.has(c.key) && !rejected.has(c.key) && c.confidence >= 0.55)
+  }, [txns, recurring, dismissed])
 
   const confirmCandidate = useMutation({
     mutationFn: (c: RecurringCandidate) =>
@@ -79,6 +94,16 @@ export default function BillsPage() {
         notes: c.key,
       }),
     onSuccess: invalidate,
+  })
+
+  const dismissCandidate = useMutation({
+    mutationFn: (c: RecurringCandidate) => dismissRecurring(userId, c.key, titleCase(c.key)),
+    onSuccess: invalidateDismissed,
+  })
+
+  const restoreCandidate = useMutation({
+    mutationFn: (id: string) => restoreRecurring(id),
+    onSuccess: invalidateDismissed,
   })
 
   if (isLoading || !accounts || !categories) return <Spinner />
@@ -131,13 +156,49 @@ export default function BillsPage() {
                     {c.priceIncreased && ' · price increased'}
                   </p>
                 </div>
-                <Button size="sm" variant="secondary" onClick={() => confirmCandidate.mutate(c)}>
-                  Confirm
+                <div className="flex shrink-0 gap-1.5">
+                  <Button size="sm" variant="secondary" onClick={() => confirmCandidate.mutate(c)}>
+                    Confirm
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-ink-faint"
+                    onClick={() => dismissCandidate.mutate(c)}
+                  >
+                    Not a bill
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-[11px] text-ink-faint">
+            Dismissing keeps the transactions — it only stops this being suggested as a recurring
+            payment.
+          </p>
+        </Card>
+      )}
+
+      {(dismissed ?? []).length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-xs text-ink-faint">
+            {dismissed!.length} dismissed as not a bill
+          </summary>
+          <div className="mt-2 space-y-1.5">
+            {dismissed!.map((d) => (
+              <div key={d.id} className="flex items-center justify-between gap-2 px-1">
+                <span className="truncate text-sm text-ink-muted">{d.label}</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => restoreCandidate.mutate(d.id)}
+                >
+                  Suggest again
                 </Button>
               </div>
             ))}
           </div>
-        </Card>
+        </details>
       )}
 
       {active.length === 0 && candidates.length === 0 && (
