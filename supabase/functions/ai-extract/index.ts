@@ -18,7 +18,9 @@ import { corsHeaders, json, requireUser, type AuthedContext } from '../_shared/c
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 
-const MODEL = 'claude-opus-5'
+// Statement transcription is mechanical extraction — Sonnet does it reliably
+// at a fraction of Opus pricing, which matters on multi-pass long statements.
+const MODEL = 'claude-sonnet-5'
 const MAX_OUTPUT_TOKENS = 32000
 const MAX_PASSES = 6
 

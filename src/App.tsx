@@ -1,6 +1,7 @@
 import { Spinner } from '@/components/ui/primitives'
 import { useAuth } from '@/context/AuthContext'
-import { lazy, Suspense } from 'react'
+import { logAppError } from '@/lib/api'
+import { lazy, Suspense, useEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import AppLayout from './components/layout/AppLayout'
 import LoginPage from './pages/auth/LoginPage'
@@ -30,6 +31,29 @@ function Loading() {
 
 export default function App() {
   const { session, loading } = useAuth()
+  const userId = session?.user.id
+
+  // Capture anything that escapes a component so it lands in the error log
+  // and can be exported from Settings, instead of only hitting the console.
+  useEffect(() => {
+    if (!userId) return
+    const onError = (e: ErrorEvent) => {
+      void logAppError(userId, 'app', e.message, { source: e.filename, line: e.lineno, stack: e.error?.stack })
+    }
+    const onRejection = (e: PromiseRejectionEvent) => {
+      const r = e.reason
+      void logAppError(userId, 'app', r instanceof Error ? r.message : String(r), {
+        stack: r instanceof Error ? r.stack : undefined,
+      })
+    }
+    window.addEventListener('error', onError)
+    window.addEventListener('unhandledrejection', onRejection)
+    return () => {
+      window.removeEventListener('error', onError)
+      window.removeEventListener('unhandledrejection', onRejection)
+    }
+  }, [userId])
+
   if (loading) return <Loading />
   if (!session) return <LoginPage />
   return (

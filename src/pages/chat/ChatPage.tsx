@@ -1,7 +1,7 @@
 import { AccountSelect, PageHeader } from '@/components/shared/common'
 import { Badge, Button, Card, Spinner, Textarea } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchAccounts, fetchConversations, fetchMessages, recordAudit } from '@/lib/api'
+import { fetchAccounts, fetchConversations, fetchMessages, logAppError, recordAudit } from '@/lib/api'
 import { isSupportedUpload, processUpload } from '@/lib/importFlow'
 import { supabase } from '@/lib/supabase'
 import type { ChatActionSummary, ChatMessage } from '@/types/domain'
@@ -110,7 +110,10 @@ export default function ChatPage() {
     onSuccess: (outcome) => {
       if (outcome && (outcome.status === 'review' || outcome.status === 'processing')) navigate(`/imports/${outcome.batchId}`)
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => {
+      setError(e.message)
+      void logAppError(userId, 'ai_chat', e.message, { stack: e.stack })
+    },
   })
 
   const send = useMutation({
@@ -150,7 +153,10 @@ export default function ChatPage() {
       qc.invalidateQueries({ queryKey: ['recurring'] })
       qc.invalidateQueries({ queryKey: ['facts'] })
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => {
+      setError(e.message)
+      void logAppError(userId, 'ai_chat', e.message, { stack: e.stack })
+    },
   })
 
   const undo = useMutation({
@@ -176,7 +182,10 @@ export default function ChatPage() {
     onSuccess: () => {
       qc.invalidateQueries()
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => {
+      setError(e.message)
+      void logAppError(userId, 'ai_chat', e.message, { stack: e.stack })
+    },
   })
 
   const submit = () => {

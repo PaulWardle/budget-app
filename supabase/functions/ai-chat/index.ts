@@ -8,7 +8,9 @@ import Anthropic from 'npm:@anthropic-ai/sdk@0.65.0'
 import { z } from 'npm:zod@3.25.76'
 import { corsHeaders, json, recordAudit, requireUser, type AuthedContext } from '../_shared/common.ts'
 
-const MODEL = 'claude-opus-5'
+// Sonnet handles this structured tool-calling well at a fraction of Opus
+// pricing; combined with prompt caching below, per-message cost drops ~10-20x.
+const MODEL = 'claude-sonnet-5'
 
 // ---------------------------------------------------------------- schemas
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -987,7 +989,7 @@ Deno.serve(async (req) => {
     .select('role,content')
     .eq('conversation_id', conversationId)
     .order('created_at', { ascending: false })
-    .limit(20)
+    .limit(12)
 
   const anthropic = new Anthropic({ apiKey })
   const contextBlock = await buildContext(ctx)
@@ -997,7 +999,18 @@ Deno.serve(async (req) => {
       .reverse()
       .slice(0, -1)
       .map((m) => ({ role: m.role, content: m.content })),
-    { role: 'user', content: `${contextBlock}\n\nUSER MESSAGE:\n${userMessage}` },
+    {
+      role: 'user',
+      // Cache breakpoint: iterations 2-8 of the tool loop reuse this whole
+      // prefix (system + tools + context) at ~10% of the input price.
+      content: [
+        {
+          type: 'text',
+          text: `${contextBlock}\n\nUSER MESSAGE:\n${userMessage}`,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+    },
   ]
 
   const executedActions: {
@@ -1018,8 +1031,10 @@ Deno.serve(async (req) => {
         max_tokens: 4096,
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
-        system: SYSTEM_PROMPT,
-        tools: TOOLS,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        tools: TOOLS.map((t, idx) =>
+          idx === TOOLS.length - 1 ? { ...t, cache_control: { type: 'ephemeral' as const } } : t,
+        ),
         messages,
       } as Anthropic.Beta.MessageCreateParamsNonStreaming)
 

@@ -7,6 +7,7 @@ import {
   fetchLiabilities,
   fetchRecurring,
   fetchTransactions,
+  logAppError,
   undoImportBatch,
 } from '@/lib/api'
 import { processUpload } from '@/lib/importFlow'
@@ -60,9 +61,16 @@ export default function ImportsPage() {
         },
       })
         .then((outcome) => {
-          if (outcome.status === 'failed') setError(outcome.error ?? `Import of ${outcome.fileName} failed`)
+          if (outcome.status === 'failed') {
+            const message = outcome.error ?? `Import of ${outcome.fileName} failed`
+            setError(message)
+            void logAppError(userId, 'import', message, { file: outcome.fileName, batch_id: outcome.batchId })
+          }
         })
-        .catch((e: Error) => setError(e.message))
+        .catch((e: Error) => {
+          setError(e.message)
+          void logAppError(userId, 'import', e.message, { file: file.name, stack: e.stack })
+        })
         .finally(() => {
           qc.invalidateQueries({ queryKey: ['batches'] })
           release()

@@ -869,6 +869,7 @@ export async function exportAllData(): Promise<Blob> {
     'loan_payment_schedules', 'debt_payments', 'net_worth_snapshots',
     'savings_goals', 'financial_facts', 'documents', 'import_batches',
     'imported_items', 'insights', 'audit_events',
+    'chat_conversations', 'chat_messages', 'ai_actions', 'error_log',
   ]
   const out: Record<string, unknown[]> = {}
   for (const t of tables) {
@@ -876,4 +877,66 @@ export async function exportAllData(): Promise<Blob> {
     out[t] = data ?? []
   }
   return new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' })
+}
+
+// ------------------------------------------------------------ error log
+/** Record an error so it survives the toast that showed it. Never throws —
+ * a failure to log must not mask the original problem. */
+export async function logAppError(
+  userId: string,
+  context: string,
+  message: string,
+  detail?: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await supabase.from('error_log').insert({
+      user_id: userId,
+      context,
+      message: message.slice(0, 2000),
+      detail: { route: window.location.pathname, ...detail },
+    })
+  } catch {
+    /* logging is best-effort */
+  }
+}
+
+export interface AppError {
+  id: string
+  occurred_at: string
+  context: string
+  message: string
+  detail: Record<string, unknown> | null
+}
+
+export async function fetchErrors(limit = 100): Promise<AppError[]> {
+  const { data } = await supabase
+    .from('error_log')
+    .select('*')
+    .order('occurred_at', { ascending: false })
+    .limit(limit)
+  return (data ?? []) as AppError[]
+}
+
+export async function clearErrors(): Promise<void> {
+  await supabase.from('error_log').delete().gte('occurred_at', '1970-01-01')
+}
+
+/** Diagnostics bundle: everything needed to debug a problem, without the
+ * full financial history — errors, failed AI actions and failed imports. */
+export async function exportDiagnostics(): Promise<Blob> {
+  const [errors, aiActions, batches, messages] = await Promise.all([
+    supabase.from('error_log').select('*').order('occurred_at', { ascending: false }).limit(500),
+    supabase.from('ai_actions').select('*').order('created_at', { ascending: false }).limit(200),
+    supabase.from('import_batches').select('*').order('created_at', { ascending: false }).limit(100),
+    supabase.from('chat_messages').select('*').order('created_at', { ascending: false }).limit(200),
+  ])
+  const bundle = {
+    exported_at: new Date().toISOString(),
+    app: { url: window.location.origin, user_agent: navigator.userAgent },
+    error_log: errors.data ?? [],
+    ai_actions: aiActions.data ?? [],
+    import_batches: batches.data ?? [],
+    chat_messages: messages.data ?? [],
+  }
+  return new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
 }

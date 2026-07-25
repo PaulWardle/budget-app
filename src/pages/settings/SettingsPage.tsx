@@ -3,10 +3,13 @@ import { Badge, Button, Card, CardTitle, Input, Label, PasswordInput, Select, Sp
 import { useAuth, useUserId } from '@/context/AuthContext'
 import { useTheme } from '@/context/ThemeContext'
 import {
+  clearErrors,
   deleteFact,
   exportAllData,
+  exportDiagnostics,
   fetchAuditEvents,
   fetchCategories,
+  fetchErrors,
   fetchFacts,
   fetchProfile,
   updateProfile,
@@ -26,6 +29,7 @@ export default function SettingsPage() {
   const { data: facts } = useQuery({ queryKey: ['facts'], queryFn: fetchFacts })
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
   const { data: audit } = useQuery({ queryKey: ['audit'], queryFn: () => fetchAuditEvents(50) })
+  const { data: errors } = useQuery({ queryKey: ['errors'], queryFn: () => fetchErrors(100) })
   const [newPassword, setNewPassword] = useState('')
   const [passwordMsg, setPasswordMsg] = useState<string | null>(null)
   const [newCategory, setNewCategory] = useState('')
@@ -148,16 +152,28 @@ export default function SettingsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['facts'] }),
   })
 
+  const download = (blob: Blob, name: string) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const doExport = useMutation({
     mutationFn: exportAllData,
-    onSuccess: (blob) => {
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `my-money-export-${new Date().toISOString().slice(0, 10)}.json`
-      a.click()
-      URL.revokeObjectURL(url)
-    },
+    onSuccess: (blob) => download(blob, `my-money-export-${new Date().toISOString().slice(0, 10)}.json`),
+  })
+
+  const doDiagnostics = useMutation({
+    mutationFn: exportDiagnostics,
+    onSuccess: (blob) => download(blob, `my-money-diagnostics-${new Date().toISOString().slice(0, 10)}.json`),
+  })
+
+  const wipeErrors = useMutation({
+    mutationFn: clearErrors,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['errors'] }),
   })
 
   if (!profile) return <Spinner />
@@ -405,6 +421,39 @@ export default function SettingsPage() {
           </Button>
         </div>
         {passwordMsg && <p className="mt-1 text-xs text-ink-muted">{passwordMsg}</p>}
+      </Card>
+
+      <Card>
+        <CardTitle>Errors &amp; diagnostics</CardTitle>
+        <p className="mb-2 text-xs text-ink-muted">
+          Problems are logged as they happen — including failed imports and AI actions — so they can
+          be exported and fixed later rather than disappearing with the message that showed them.
+        </p>
+        <div className="mb-2 flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => doDiagnostics.mutate()} disabled={doDiagnostics.isPending}>
+            <Download className="h-4 w-4" /> Export diagnostics
+          </Button>
+          {(errors ?? []).length > 0 && (
+            <Button variant="ghost" onClick={() => wipeErrors.mutate()} disabled={wipeErrors.isPending}>
+              Clear log
+            </Button>
+          )}
+        </div>
+        {(errors ?? []).length === 0 ? (
+          <p className="text-xs text-ink-faint">No errors logged.</p>
+        ) : (
+          <div className="max-h-60 space-y-1 overflow-y-auto">
+            {(errors ?? []).map((e) => (
+              <div key={e.id} className="border-b border-border pb-1 text-xs">
+                <Badge tone="warn" className="mr-1.5">{e.context}</Badge>
+                {e.message}
+                <span className="ml-1.5 text-[11px] text-ink-faint">
+                  {formatDateTime(e.occurred_at)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       <Card>
