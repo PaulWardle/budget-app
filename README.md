@@ -41,7 +41,7 @@ npm test        # finance engine: money, amortisation, budgets, net worth,
 
 ## Deployment
 
-See `docs/DEPLOYMENT.md` for Netlify + Supabase production steps.
+See `docs/DEPLOYMENT.md` for Cloudflare Pages + Supabase production steps.
 
 ## Security notes
 

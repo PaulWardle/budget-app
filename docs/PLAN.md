@@ -24,7 +24,7 @@ src/
   pages/                 one folder per nav section
   types/                 database types + domain types
 docs/                    architecture, plan, deployment
-netlify.toml
+public/                  _redirects + _headers for Cloudflare Pages
 ```
 
 ## Database schema (tables)

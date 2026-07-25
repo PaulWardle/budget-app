@@ -22,7 +22,7 @@ chat — not Open Banking (yet). The design keeps a hard boundary between:
 | Validation | Zod (client forms + edge-function payloads) |
 | Backend | Supabase: Postgres, Auth, Storage (private buckets), Edge Functions, RLS |
 | AI | Anthropic Claude via Edge Functions only (`ANTHROPIC_API_KEY` is a function secret) |
-| Deploy | Netlify (static SPA) + Supabase (db/functions) |
+| Deploy | Cloudflare Pages (static SPA) + Supabase (db/functions) |
 
 ## Money representation
 
@@ -106,5 +106,6 @@ undoable: rule creation, batch import, balance update, splits, AI-created record
 
 - **Supabase**: `supabase link`, `supabase db push` (migrations in `supabase/migrations/`),
   `supabase functions deploy ai-chat ai-extract`, `supabase secrets set ANTHROPIC_API_KEY=…`
-- **Netlify**: build `npm run build`, publish `dist/`, SPA redirect in `netlify.toml`,
-  env vars `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`. See `docs/DEPLOYMENT.md`.
+- **Cloudflare Pages**: build `npm run build`, output `dist/`, SPA fallback via
+  `public/_redirects`, security headers via `public/_headers`, env vars
+  `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`. See `docs/DEPLOYMENT.md`.

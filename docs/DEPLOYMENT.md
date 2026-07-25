@@ -18,20 +18,34 @@ supabase functions deploy ai-chat ai-extract
 supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+The AI secret can also be set in the dashboard: Project Settings → Edge Functions →
+Secrets → add `ANTHROPIC_API_KEY`. Get a key at https://console.anthropic.com →
+API keys. The key never reaches the browser — it lives only in the function runtime.
+
 Auth settings (Dashboard → Authentication):
 - Enable Email provider. Disable public sign-ups if you want strictly single-user
   (create your user manually), or leave enabled and simply don't share the URL.
-- Set the Site URL to your Netlify URL so password-reset emails link correctly.
+- Set the Site URL to your Cloudflare Pages URL so password-reset emails link correctly.
 
-## 2. Netlify (frontend)
+## 2. Cloudflare Pages (frontend)
 
-`netlify.toml` is committed (build `npm run build`, publish `dist`, SPA redirect).
+The repo ships `public/_redirects` (SPA fallback) and `public/_headers`
+(security headers) — Cloudflare picks both up automatically from the build output.
 
-1. New site → import this repository.
-2. Environment variables:
+1. Cloudflare dashboard → **Workers & Pages → Create → Pages → Connect to Git**
+   and select this repository + branch.
+2. Build settings:
+   - Framework preset: **None** (or Vite)
+   - Build command: `npm run build`
+   - Build output directory: `dist`
+3. Environment variables (Settings → Environment variables, add to Production):
    - `VITE_SUPABASE_URL` = https://<ref>.supabase.co
    - `VITE_SUPABASE_ANON_KEY` = the publishable/anon key (never the service role key)
-3. Deploy. 
+   - `NODE_VERSION` = `22`
+4. Deploy. Every push to the branch redeploys automatically.
+
+A custom domain can be added later under the Pages project → Custom domains
+(free on Cloudflare, including the certificate).
 
 ## 3. Post-deploy checklist
 
