@@ -115,27 +115,30 @@ export default function SettingsPage() {
     onError: (e: Error) => setCatMsg(e.message),
   })
 
-  // Unused categories are deleted outright. A category with transactions is
-  // archived instead — it disappears from pickers but history keeps its label.
+  // Deleting a category releases its transactions: they become uncategorised
+  // and flagged for review, so they surface in Data Quality and the bulk
+  // categorise flow until reallocated. Every total recomputes from the ledger.
   const removeCategory = useMutation({
     mutationFn: async (id: string) => {
       const ids = [id, ...(categories ?? []).filter((c) => c.parent_id === id).map((c) => c.id)]
-      const { count } = await supabase
+      const { data: released, error: tErr } = await supabase
         .from('transactions')
-        .select('id', { count: 'exact', head: true })
+        .update({ category_id: null, needs_review: true })
         .in('category_id', ids)
-      if ((count ?? 0) > 0) {
-        const { error } = await supabase.from('categories').update({ is_archived: true }).in('id', ids)
-        if (error) throw new Error(error.message)
-        return `Archived — ${count} transaction${count === 1 ? '' : 's'} keep the label but it's hidden from pickers`
-      }
+        .select('id')
+      if (tErr) throw new Error(tErr.message)
       const { error } = await supabase.from('categories').delete().in('id', ids)
       if (error) throw new Error(error.message)
-      return 'Deleted'
+      const n = released?.length ?? 0
+      return n > 0
+        ? `Deleted — ${n} transaction${n === 1 ? '' : 's'} flagged as uncategorised for you to reallocate`
+        : 'Deleted'
     },
     onSuccess: (msg) => {
       setCatMsg(msg)
       qc.invalidateQueries({ queryKey: ['categories'] })
+      qc.invalidateQueries({ queryKey: ['transactions'] })
+      qc.invalidateQueries({ queryKey: ['budget'] })
     },
     onError: (e: Error) => setCatMsg(e.message),
   })
@@ -206,8 +209,9 @@ export default function SettingsPage() {
       <Card>
         <CardTitle>Categories</CardTitle>
         <p className="mb-2 text-xs text-ink-muted">
-          Pick a category to rename it, remove it or manage its subcategories. Removing one that's
-          in use archives it (past transactions keep their label); an unused one is deleted.
+          Pick a category to rename it, remove it or manage its subcategories. Removing one frees
+          its transactions: they're flagged as uncategorised so you can reallocate them, and all
+          stats recalculate once you do.
         </p>
         {catMsg && <p className="mb-2 text-xs text-accent">{catMsg}</p>}
         <Select
