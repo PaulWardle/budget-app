@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "budget-app",
+  "compatibility_date": "2026-07-25",
+  // Runs before deploy so `npx wrangler deploy` alone produces a fresh build.
+  "build": {
+    "command": "npm run build"
+  },
+  "assets": {
+    "directory": "./dist",
+    // SPA fallback is handled here — do NOT add a `_redirects` file for it;
+    // Workers assets rejects `/* /index.html 200` as an infinite loop.
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

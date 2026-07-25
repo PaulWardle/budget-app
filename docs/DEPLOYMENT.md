@@ -27,21 +27,22 @@ Auth settings (Dashboard → Authentication):
   (create your user manually), or leave enabled and simply don't share the URL.
 - Set the Site URL to your Cloudflare Pages URL so password-reset emails link correctly.
 
-## 2. Cloudflare Pages (frontend)
+## 2. Cloudflare Workers (frontend)
 
-The repo ships `public/_redirects` (SPA fallback) and `public/_headers`
-(security headers) — Cloudflare picks both up automatically from the build output.
+The repo ships `wrangler.jsonc` (Workers static-assets config with SPA fallback
+via `not_found_handling` and a build step) and `public/_headers` (security
+headers). Do NOT add a `_redirects` SPA rule — Workers assets rejects
+`/* /index.html 200` as an infinite loop; the SPA fallback lives in
+`wrangler.jsonc` instead.
 
-1. Cloudflare dashboard → **Workers & Pages → Create → Pages → Connect to Git**
+1. Cloudflare dashboard → **Workers & Pages → Create → Connect to Git**
    and select this repository + branch.
-2. Build settings:
-   - Framework preset: **None** (or Vite)
-   - Build command: `npm run build`
-   - Build output directory: `dist`
-3. Environment variables (Settings → Environment variables, add to Production):
+2. Build settings can stay minimal — the deploy command `npx wrangler deploy`
+   is enough (wrangler runs `npm run build` itself via the config's `build.command`).
+3. Environment variables (project → Settings → Variables, Build environment):
    - `VITE_SUPABASE_URL` = https://<ref>.supabase.co
    - `VITE_SUPABASE_ANON_KEY` = the publishable/anon key (never the service role key)
-   - `NODE_VERSION` = `22`
+   These are build-time values baked into the static bundle, so set them for builds.
 4. Deploy. Every push to the branch redeploys automatically.
 
 A custom domain can be added later under the Pages project → Custom domains
