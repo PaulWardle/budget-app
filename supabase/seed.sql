@@ -1,4 +1,4 @@
--- My Money OS — reference data
+-- My Money — reference data
 -- Category templates copied into per-user categories on first sign-in.
 -- Users can rename/archive/add categories freely afterwards.
 

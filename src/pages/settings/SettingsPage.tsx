@@ -1,5 +1,5 @@
 import { PageHeader } from '@/components/shared/common'
-import { Badge, Button, Card, CardTitle, Input, Label, Select, Spinner } from '@/components/ui/primitives'
+import { Badge, Button, Card, CardTitle, Input, Label, PasswordInput, Select, Spinner } from '@/components/ui/primitives'
 import { useAuth, useUserId } from '@/context/AuthContext'
 import { useTheme } from '@/context/ThemeContext'
 import {
@@ -82,7 +82,7 @@ export default function SettingsPage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `my-money-os-export-${new Date().toISOString().slice(0, 10)}.json`
+      a.download = `my-money-export-${new Date().toISOString().slice(0, 10)}.json`
       a.click()
       URL.revokeObjectURL(url)
     },
@@ -207,8 +207,7 @@ export default function SettingsPage() {
         <div className="flex items-end gap-2">
           <div className="flex-1">
             <Label>New password</Label>
-            <Input
-              type="password"
+            <PasswordInput
               autoComplete="new-password"
               minLength={8}
               value={newPassword}

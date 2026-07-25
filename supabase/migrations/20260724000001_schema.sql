@@ -1,4 +1,4 @@
--- My Money OS — core schema
+-- My Money — core schema
 -- Money is stored as integer minor units (pence) in *_minor bigint columns.
 -- Rates/percentages use numeric. Every private table carries user_id for RLS.
 

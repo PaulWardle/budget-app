@@ -1,4 +1,4 @@
-// Shared helpers for My Money OS edge functions.
+// Shared helpers for My Money edge functions.
 // Every function runs with the CALLING USER'S JWT so RLS applies to all
 // database work the AI performs — the AI can never touch another user's rows.
 

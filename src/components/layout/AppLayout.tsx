@@ -43,9 +43,11 @@ export default function AppLayout() {
     <div className="flex min-h-dvh">
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 hidden w-56 flex-col border-r border-border bg-surface p-3 lg:flex">
-        <div className="mb-4 flex items-center gap-2 px-2 pt-1">
-          <Banknote className="h-5 w-5 text-accent" />
-          <span className="text-sm font-bold tracking-tight">My Money OS</span>
+        <div className="mb-4 flex items-center gap-2.5 px-2 pt-1">
+          <span className="grad-accent flex h-8 w-8 items-center justify-center rounded-xl shadow-sm">
+            <Banknote className="h-4.5 w-4.5 text-white" />
+          </span>
+          <span className="text-base font-extrabold tracking-tight">My Money</span>
         </div>
         <nav className="flex-1 space-y-0.5">
           {NAV.map(({ to, label, icon: Icon }) => (
@@ -55,9 +57,9 @@ export default function AppLayout() {
               end={to === '/'}
               className={({ isActive }) =>
                 cn(
-                  'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors',
+                  'flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm font-medium transition-all',
                   isActive
-                    ? 'bg-accent/10 text-accent'
+                    ? 'grad-accent text-white shadow-sm'
                     : 'text-ink-muted hover:bg-surface-2 hover:text-ink',
                 )
               }
@@ -88,7 +90,7 @@ export default function AppLayout() {
       </main>
 
       {/* Mobile bottom nav */}
-      <nav className="fixed inset-x-0 bottom-0 z-40 flex border-t border-border bg-surface pb-[env(safe-area-inset-bottom)] lg:hidden">
+      <nav className="fixed inset-x-0 bottom-0 z-40 flex border-t border-border bg-surface/90 backdrop-blur-lg pb-[env(safe-area-inset-bottom)] lg:hidden">
         {NAV.filter((n) => n.mobile).map(({ to, label, icon: Icon, mobileLabel }) => (
           <NavLink
             key={to}
@@ -96,7 +98,7 @@ export default function AppLayout() {
             end={to === '/'}
             className={({ isActive }) =>
               cn(
-                'flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px] font-medium',
+                'flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px] font-semibold transition-colors',
                 isActive ? 'text-accent' : 'text-ink-faint',
               )
             }

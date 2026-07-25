@@ -1,4 +1,4 @@
-# My Money OS
+# My Money
 
 A private, mobile-first personal finance command centre. Bank statement screenshots,
 PDFs, CSVs, manual entry and an AI assistant go in; reliable budgets, cashflow

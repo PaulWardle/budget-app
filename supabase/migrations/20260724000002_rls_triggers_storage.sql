@@ -1,4 +1,4 @@
--- My Money OS — RLS, triggers, bootstrap and storage
+-- My Money — RLS, triggers, bootstrap and storage
 -- Every private table is locked to user_id = auth.uid() for ALL operations.
 
 -- ------------------------------------------------------------------- RLS

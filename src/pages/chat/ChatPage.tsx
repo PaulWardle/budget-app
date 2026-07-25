@@ -1,12 +1,14 @@
-import { PageHeader } from '@/components/shared/common'
+import { AccountSelect, PageHeader } from '@/components/shared/common'
 import { Badge, Button, Card, Spinner, Textarea } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchConversations, fetchMessages, recordAudit } from '@/lib/api'
+import { fetchAccounts, fetchConversations, fetchMessages, recordAudit } from '@/lib/api'
+import { isSupportedUpload, processUpload } from '@/lib/importFlow'
 import { supabase } from '@/lib/supabase'
 import type { ChatActionSummary, ChatMessage } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Send, Undo2 } from 'lucide-react'
+import { Camera, Paperclip, Send, Undo2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 const SUGGESTIONS = [
   'How much did I spend eating out last month?',
@@ -24,9 +26,15 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const [pending, setPending] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [attached, setAttached] = useState<File | null>(null)
+  const [attachAccountId, setAttachAccountId] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const cameraRef = useRef<HTMLInputElement>(null)
+  const navigate = useNavigate()
 
   const { data: conversations } = useQuery({ queryKey: ['conversations'], queryFn: fetchConversations })
+  const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   useEffect(() => {
     if (conversations && conversations.length > 0 && !conversationId) {
       setConversationId(conversations[0].id)
@@ -43,21 +51,70 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, pending])
 
+  async function ensureConversation(title: string): Promise<string> {
+    if (conversationId) return conversationId
+    const { data, error: cErr } = await supabase
+      .from('chat_conversations')
+      .insert({ user_id: userId, title: title.slice(0, 60) })
+      .select()
+      .single()
+    if (cErr) throw new Error(cErr.message)
+    setConversationId(data.id as string)
+    return data.id as string
+  }
+
+  function onFilePicked(file: File | null) {
+    if (!file) return
+    if (!isSupportedUpload(file)) {
+      setError('That file type isn’t supported — use a photo, screenshot, PDF or CSV.')
+      return
+    }
+    setError(null)
+    setAttached(file)
+    if (!attachAccountId && accounts && accounts.length > 0) setAttachAccountId(accounts[0].id)
+  }
+
+  const importAttachment = useMutation({
+    mutationFn: async () => {
+      if (!attached) return
+      const file = attached
+      const convId = await ensureConversation(`Import: ${file.name}`)
+      await supabase.from('chat_messages').insert({
+        user_id: userId,
+        conversation_id: convId,
+        role: 'user',
+        content: `📎 Uploaded ${file.name}`,
+      })
+      const outcome = await processUpload(userId, file, attachAccountId)
+      const reply =
+        outcome.status === 'review'
+          ? `I’ve read ${outcome.extracted} transaction${outcome.extracted === 1 ? '' : 's'} from ${file.name}. Nothing is saved yet — I’m taking you to the review screen to check and confirm them.`
+          : `I couldn’t read ${file.name}: ${outcome.error ?? 'unknown error'}. Try a clearer photo or a CSV export from your bank.`
+      await supabase.from('chat_messages').insert({
+        user_id: userId,
+        conversation_id: convId,
+        role: 'assistant',
+        content: reply,
+      })
+      return outcome
+    },
+    onSettled: () => {
+      setAttached(null)
+      qc.invalidateQueries({ queryKey: ['messages'] })
+      qc.invalidateQueries({ queryKey: ['conversations'] })
+      qc.invalidateQueries({ queryKey: ['batches'] })
+    },
+    onSuccess: (outcome) => {
+      if (outcome && outcome.status === 'review') navigate(`/imports/${outcome.batchId}`)
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
   const send = useMutation({
     mutationFn: async (text: string) => {
       setPending(text)
       setError(null)
-      let convId = conversationId
-      if (!convId) {
-        const { data, error: cErr } = await supabase
-          .from('chat_conversations')
-          .insert({ user_id: userId, title: text.slice(0, 60) })
-          .select()
-          .single()
-        if (cErr) throw new Error(cErr.message)
-        convId = data.id as string
-        setConversationId(convId)
-      }
+      const convId = await ensureConversation(text)
       const { data: session } = await supabase.auth.getSession()
       const { data, error: fnErr } = await supabase.functions.invoke('ai-chat', {
         body: { conversation_id: convId, message: text },
@@ -165,7 +222,63 @@ export default function ChatPage() {
         {error && <p className="text-xs text-bad">{error}</p>}
         <div ref={bottomRef} />
       </div>
+      {attached && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface p-2.5">
+          <Paperclip className="h-4 w-4 shrink-0 text-ink-faint" />
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">{attached.name}</span>
+          <div className="w-44">
+            <AccountSelect
+              accounts={accounts ?? []}
+              value={attachAccountId}
+              onChange={setAttachAccountId}
+            />
+          </div>
+          <Button
+            size="sm"
+            onClick={() => importAttachment.mutate()}
+            disabled={importAttachment.isPending || !attachAccountId}
+          >
+            {importAttachment.isPending ? 'Reading…' : 'Import'}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setAttached(null)}>
+            Cancel
+          </Button>
+        </div>
+      )}
       <div className="flex items-end gap-2 border-t border-border pt-3">
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".png,.jpg,.jpeg,.pdf,.csv,image/png,image/jpeg,application/pdf,text/csv"
+          className="hidden"
+          onChange={(e) => onFilePicked(e.target.files?.[0] ?? null)}
+        />
+        <input
+          ref={cameraRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={(e) => onFilePicked(e.target.files?.[0] ?? null)}
+        />
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={() => fileRef.current?.click()}
+          aria-label="Attach a photo or file"
+          disabled={(accounts ?? []).length === 0}
+        >
+          <Paperclip className="h-4 w-4" />
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={() => cameraRef.current?.click()}
+          aria-label="Take a photo"
+          disabled={(accounts ?? []).length === 0}
+        >
+          <Camera className="h-4 w-4" />
+        </Button>
         <Textarea
           rows={1}
           placeholder="Ask anything about your money…"

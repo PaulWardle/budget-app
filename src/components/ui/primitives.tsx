@@ -1,19 +1,19 @@
 // Compact shadcn-style primitives used across the app.
 import { cn } from '@/lib/utils'
 import { cva, type VariantProps } from 'class-variance-authority'
-import { X } from 'lucide-react'
-import { createContext, useContext, useEffect, type ReactNode } from 'react'
+import { Eye, EyeOff, X } from 'lucide-react'
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 
 export const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-accent cursor-pointer',
+  'inline-flex items-center justify-center gap-1.5 rounded-xl font-medium transition-all disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-accent cursor-pointer',
   {
     variants: {
       variant: {
-        primary: 'bg-accent text-accent-ink hover:opacity-90',
+        primary: 'grad-accent text-accent-ink shadow-sm hover:opacity-90 hover:shadow-md',
         secondary: 'bg-surface-2 text-ink hover:bg-border',
         outline: 'border border-border text-ink hover:bg-surface-2',
         ghost: 'text-ink-muted hover:bg-surface-2 hover:text-ink',
-        danger: 'bg-bad text-white hover:opacity-90',
+        danger: 'bg-bad text-white shadow-sm hover:opacity-90',
       },
       size: {
         sm: 'h-8 px-2.5 text-xs',
@@ -38,7 +38,7 @@ export function Button({
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn('rounded-xl border border-border bg-surface p-4', className)}
+      className={cn('rounded-2xl border border-border bg-surface p-4 shadow-[0_1px_2px_rgb(20_22_43/0.04)]', className)}
       {...props}
     />
   )
@@ -57,7 +57,7 @@ export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInp
   return (
     <input
       className={cn(
-        'h-9 w-full rounded-lg border border-border bg-surface px-3 text-sm text-ink placeholder:text-ink-faint focus-visible:outline-2 focus-visible:outline-accent',
+        'h-9 w-full rounded-xl border border-border bg-surface px-3 text-sm text-ink placeholder:text-ink-faint focus-visible:outline-2 focus-visible:outline-accent',
         className,
       )}
       {...props}
@@ -65,11 +65,33 @@ export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInp
   )
 }
 
+/** Password field with a show/hide toggle. */
+export function PasswordInput({
+  className,
+  ...props
+}: Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type'>) {
+  const [visible, setVisible] = useState(false)
+  return (
+    <div className="relative">
+      <Input type={visible ? 'text' : 'password'} className={cn('pr-10', className)} {...props} />
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-label={visible ? 'Hide password' : 'Show password'}
+        className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-ink-faint hover:text-ink cursor-pointer"
+        onClick={() => setVisible((v) => !v)}
+      >
+        {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  )
+}
+
 export function Textarea({ className, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return (
     <textarea
       className={cn(
-        'w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus-visible:outline-2 focus-visible:outline-accent',
+        'w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus-visible:outline-2 focus-visible:outline-accent',
         className,
       )}
       {...props}
@@ -81,7 +103,7 @@ export function Select({ className, ...props }: React.SelectHTMLAttributes<HTMLS
   return (
     <select
       className={cn(
-        'h-9 w-full rounded-lg border border-border bg-surface px-2.5 text-sm text-ink focus-visible:outline-2 focus-visible:outline-accent',
+        'h-9 w-full rounded-xl border border-border bg-surface px-2.5 text-sm text-ink focus-visible:outline-2 focus-visible:outline-accent',
         className,
       )}
       {...props}
@@ -126,9 +148,9 @@ export function ProgressBar({
   tone?: 'accent' | 'good' | 'warn' | 'bad'
   className?: string
 }) {
-  const tones = { accent: 'bg-accent', good: 'bg-good', warn: 'bg-warn', bad: 'bg-bad' }
+  const tones = { accent: 'grad-accent', good: 'bg-good', warn: 'bg-warn', bad: 'bg-bad' }
   return (
-    <div className={cn('h-1.5 w-full overflow-hidden rounded-full bg-surface-2', className)}>
+    <div className={cn('h-2 w-full overflow-hidden rounded-full bg-surface-2', className)}>
       <div
         className={cn('h-full rounded-full transition-all', tones[tone])}
         style={{ width: `${Math.min(100, Math.max(0, value))}%` }}

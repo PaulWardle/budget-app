@@ -1,4 +1,4 @@
-import { Button, Card, Input, Label } from '@/components/ui/primitives'
+import { Button, Card, Input, Label, PasswordInput } from '@/components/ui/primitives'
 import { useAuth } from '@/context/AuthContext'
 import { supabaseConfigured } from '@/lib/supabase'
 import { Banknote } from 'lucide-react'
@@ -41,9 +41,11 @@ export default function LoginPage() {
   return (
     <div className="flex min-h-dvh items-center justify-center p-4">
       <Card className="w-full max-w-sm p-6">
-        <div className="mb-5 flex items-center gap-2">
-          <Banknote className="h-6 w-6 text-accent" />
-          <h1 className="text-lg font-bold tracking-tight">My Money OS</h1>
+        <div className="mb-5 flex items-center gap-2.5">
+          <span className="grad-accent flex h-10 w-10 items-center justify-center rounded-2xl shadow-sm">
+            <Banknote className="h-5 w-5 text-white" />
+          </span>
+          <h1 className="text-xl font-extrabold tracking-tight">My Money</h1>
         </div>
         {!supabaseConfigured && (
           <p className="mb-4 rounded-lg bg-warn/10 p-3 text-xs text-warn">
@@ -66,9 +68,8 @@ export default function LoginPage() {
           {mode !== 'reset' && (
             <div>
               <Label htmlFor="password">Password</Label>
-              <Input
+              <PasswordInput
                 id="password"
-                type="password"
                 autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                 required
                 minLength={8}

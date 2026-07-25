@@ -14,6 +14,7 @@
   --color-ink-muted: var(--app-ink-muted);
   --color-ink-faint: var(--app-ink-faint);
   --color-accent: var(--app-accent);
+  --color-accent-2: var(--app-accent-2);
   --color-accent-ink: var(--app-accent-ink);
   --color-good: var(--app-good);
   --color-warn: var(--app-warn);
@@ -21,33 +22,35 @@
 }
 
 :root {
-  --app-bg: #f6f7f9;
+  --app-bg: #f4f4fb;
   --app-surface: #ffffff;
-  --app-surface-2: #eef0f3;
-  --app-border: #dfe3e8;
-  --app-ink: #12161d;
-  --app-ink-muted: #4b5563;
-  --app-ink-faint: #8a94a1;
-  --app-accent: #2557d6;
+  --app-surface-2: #eef0f8;
+  --app-border: #e3e6f0;
+  --app-ink: #14162b;
+  --app-ink-muted: #4d5470;
+  --app-ink-faint: #8a90ab;
+  --app-accent: #635bff;
+  --app-accent-2: #a855f7;
   --app-accent-ink: #ffffff;
-  --app-good: #157f3d;
-  --app-warn: #b45309;
-  --app-bad: #b91c1c;
+  --app-good: #059669;
+  --app-warn: #d97706;
+  --app-bad: #e11d48;
 }
 
 .dark {
-  --app-bg: #0b0f17;
-  --app-surface: #121826;
-  --app-surface-2: #1a2233;
-  --app-border: #232d40;
-  --app-ink: #e8ecf3;
-  --app-ink-muted: #9aa6b8;
-  --app-ink-faint: #5d6a80;
-  --app-accent: #4f7df9;
+  --app-bg: #0c0d1d;
+  --app-surface: #151735;
+  --app-surface-2: #1e2147;
+  --app-border: #2a2e5c;
+  --app-ink: #eceef8;
+  --app-ink-muted: #9aa1c4;
+  --app-ink-faint: #5f668f;
+  --app-accent: #7b74ff;
+  --app-accent-2: #c084fc;
   --app-accent-ink: #ffffff;
-  --app-good: #34c471;
-  --app-warn: #f0a13c;
-  --app-bad: #f4655f;
+  --app-good: #34d399;
+  --app-warn: #fbbf24;
+  --app-bad: #fb7185;
 }
 
 html,
@@ -67,6 +70,18 @@ body {
 /* Tabular figures everywhere money appears */
 .tnum {
   font-variant-numeric: tabular-nums;
+}
+
+/* Signature gradient — buttons, brand mark, active nav pill */
+.grad-accent {
+  background-image: linear-gradient(135deg, var(--app-accent), var(--app-accent-2));
+}
+
+.grad-text {
+  background-image: linear-gradient(135deg, var(--app-accent), var(--app-accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 ::selection {

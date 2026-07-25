@@ -2,23 +2,18 @@ import { AccountSelect, PageHeader } from '@/components/shared/common'
 import { Badge, Button, Card, CardTitle, EmptyState, Label, Spinner } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
 import {
-  applyRules,
   fetchAccounts,
   fetchBatches,
   fetchLiabilities,
   fetchRecurring,
-  fetchRules,
   fetchTransactions,
-  recordAudit,
   undoImportBatch,
-  uploadDocument,
 } from '@/lib/api'
-import { parseStatementCsv } from '@/lib/csv'
+import { processUpload } from '@/lib/importFlow'
 import { dedupeHash } from '@/lib/engine/duplicates'
 import { formatDateTime, relativeDays } from '@/lib/format'
-import { supabase } from '@/lib/supabase'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileUp, Upload } from 'lucide-react'
+import { Camera, FileUp, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 
@@ -35,112 +30,21 @@ export default function ImportsPage() {
   const { data: liabilities } = useQuery({ queryKey: ['liabilities'], queryFn: fetchLiabilities })
   const { data: recurring } = useQuery({ queryKey: ['recurring'], queryFn: fetchRecurring })
   const fileRef = useRef<HTMLInputElement>(null)
+  const cameraRef = useRef<HTMLInputElement>(null)
   const [accountId, setAccountId] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const upload = useMutation({
     mutationFn: async (files: FileList) => {
-      if (!accountId && ![...files].every((f) => f.name.toLowerCase().endsWith('.pdf'))) {
-        // Account required for statements; contracts can go without
-      }
+      let lastBatchId: string | null = null
       for (const file of files) {
-        setStatus(`Uploading ${file.name}…`)
-        const isCsv = file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')
-        const kind = isCsv ? 'statement' : file.type === 'application/pdf' ? 'statement' : 'statement'
-        const doc = await uploadDocument(userId, file, kind)
-        const sourceType = isCsv ? 'csv' : file.type === 'application/pdf' ? 'pdf' : 'screenshot'
-        const { data: batch, error: bErr } = await supabase
-          .from('import_batches')
-          .insert({
-            user_id: userId,
-            account_id: accountId,
-            document_id: doc.id,
-            source_type: sourceType,
-            file_name: file.name,
-            status: 'processing',
-          })
-          .select()
-          .single()
-        if (bErr) throw new Error(bErr.message)
-
-        if (isCsv) {
-          setStatus(`Reading ${file.name}…`)
-          const text = await file.text()
-          const parsed = parseStatementCsv(text)
-          if (parsed.error && parsed.transactions.length === 0) {
-            await supabase.from('import_batches').update({ status: 'failed', error: parsed.error }).eq('id', batch.id)
-            throw new Error(parsed.error)
-          }
-          const rules = await fetchRules()
-          const existing = (transactions ?? []).map((t) => ({
-            id: t.id,
-            accountId: t.account_id,
-            date: t.date,
-            amountMinor: t.amount_minor,
-            description: t.description,
-            runningBalanceMinor: t.running_balance_minor,
-          }))
-          const { findDuplicates } = await import('@/lib/engine/duplicates')
-          const items = parsed.transactions.map((t) => {
-            const ruleHit = applyRules(t.description, rules)
-            const dupes = accountId
-              ? findDuplicates(
-                  { accountId, date: t.date, amountMinor: t.amountMinor, description: t.description, runningBalanceMinor: t.balanceMinor },
-                  existing,
-                )
-              : []
-            const top = dupes[0]
-            return {
-              user_id: userId,
-              batch_id: batch.id,
-              raw_text: t.raw,
-              extracted: { reference: t.reference },
-              proposed_date: t.date,
-              proposed_description: t.description,
-              proposed_amount_minor: t.amountMinor,
-              proposed_merchant: null,
-              proposed_category_id: ruleHit?.categoryId ?? null,
-              running_balance_minor: t.balanceMinor,
-              confidence: 0.98, // deterministic parse
-              duplicate_of: top && top.score >= 0.75 ? top.existingId : null,
-              duplicate_score: top?.score ?? null,
-              status: 'proposed',
-            }
-          })
-          if (items.length > 0) {
-            const { error: iErr } = await supabase.from('imported_items').insert(items)
-            if (iErr) throw new Error(iErr.message)
-          }
-          await supabase
-            .from('import_batches')
-            .update({ status: 'review', stats: { extracted: items.length, skipped: parsed.skipped } })
-            .eq('id', batch.id)
-          await recordAudit({
-            userId, recordType: 'import_batch', recordId: batch.id, action: 'insert',
-            next: { file: file.name, extracted: items.length }, source: 'import',
-          })
-          navigate(`/imports/${batch.id}`)
-        } else {
-          // Image/PDF → AI extraction via edge function
-          setStatus(`Asking AI to read ${file.name}…`)
-          const { data: session } = await supabase.auth.getSession()
-          const { error: fnErr } = await supabase.functions.invoke('ai-extract', {
-            body: { batch_id: batch.id, document_id: doc.id, account_id: accountId },
-            headers: { Authorization: `Bearer ${session.session?.access_token}` },
-          })
-          if (fnErr) {
-            await supabase
-              .from('import_batches')
-              .update({ status: 'failed', error: 'AI extraction unavailable. Deploy the ai-extract edge function and set ANTHROPIC_API_KEY.' })
-              .eq('id', batch.id)
-            throw new Error(
-              'AI extraction is not available yet. CSV imports work without it; for screenshots/PDFs deploy the ai-extract function (see README).',
-            )
-          }
-          navigate(`/imports/${batch.id}`)
-        }
+        setStatus(`Processing ${file.name}…`)
+        const outcome = await processUpload(userId, file, accountId)
+        if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Import failed')
+        lastBatchId = outcome.batchId
       }
+      if (lastBatchId) navigate(`/imports/${lastBatchId}`)
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['batches'] })
@@ -203,13 +107,28 @@ export default function ImportsPage() {
             className="hidden"
             onChange={(e) => e.target.files && e.target.files.length > 0 && upload.mutate(e.target.files)}
           />
-          <Button onClick={() => fileRef.current?.click()} disabled={upload.isPending}>
-            <Upload className="h-4 w-4" />
-            {upload.isPending ? (status ?? 'Working…') : 'Choose files'}
-          </Button>
+          <input
+            ref={cameraRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={(e) => e.target.files && e.target.files.length > 0 && upload.mutate(e.target.files)}
+          />
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => fileRef.current?.click()} disabled={upload.isPending}>
+              <Upload className="h-4 w-4" />
+              {upload.isPending ? (status ?? 'Working…') : 'Choose files or photos'}
+            </Button>
+            <Button variant="outline" onClick={() => cameraRef.current?.click()} disabled={upload.isPending}>
+              <Camera className="h-4 w-4" /> Take photo
+            </Button>
+          </div>
           <p className="text-[11px] text-ink-faint">
-            PNG, JPG, PDF or CSV, up to 15&nbsp;MB. CSVs are parsed deterministically in the app;
-            screenshots and PDFs are read by AI and always go through your review before saving.
+            Screenshots, photos, PDFs or CSV exports, up to 15&nbsp;MB. On a phone, “Choose files
+            or photos” opens your photo library and “Take photo” opens the camera. CSVs are parsed
+            in the app; images and PDFs are read by AI — everything goes through your review
+            screen before anything is saved.
           </p>
           {error && <p className="text-xs text-bad">{error}</p>}
         </div>

@@ -1,4 +1,4 @@
-# My Money OS — Architecture
+# My Money — Architecture
 
 A private, single-user, mobile-first personal finance command centre. Financial data
 enters via statement screenshots, PDFs, CSVs, manual entry and natural-language AI
