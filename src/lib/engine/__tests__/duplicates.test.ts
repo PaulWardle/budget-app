@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dedupeHash, findDuplicates, type ExistingTxn } from '../duplicates'
+import { dedupeHash, findDuplicates, findSavedDuplicateGroups, type ExistingTxn } from '../duplicates'
 
 const existing: ExistingTxn[] = [
   {
@@ -66,6 +66,29 @@ describe('findDuplicates', () => {
         existing,
       ),
     ).toEqual([])
+  })
+
+  it('saved-ledger view: differing running balances mean separate real transactions', () => {
+    const base = { account_id: 'halifax', date: '2026-07-20', amount_minor: -10, description: 'DAILY OD INT 18JUL' }
+    // Two daily interest charges posted the same day — balances differ, not dupes
+    const distinct = [
+      { ...base, id: 'a', running_balance_minor: 100_00 },
+      { ...base, id: 'b', description: 'DAILY OD INT 19JUL', running_balance_minor: 99_90 },
+    ]
+    expect(findSavedDuplicateGroups(distinct)).toEqual([])
+    // Identical balances (or missing ones) still flag
+    const identical = [
+      { ...base, id: 'a', running_balance_minor: 100_00 },
+      { ...base, id: 'b', running_balance_minor: 100_00 },
+    ]
+    expect(findSavedDuplicateGroups(identical)).toHaveLength(1)
+    const missing = [
+      { ...base, id: 'a', running_balance_minor: null },
+      { ...base, id: 'b', running_balance_minor: null },
+    ]
+    expect(findSavedDuplicateGroups(missing)).toHaveLength(1)
+    // User-dismissed pairs stay hidden
+    expect(findSavedDuplicateGroups(missing.map((t) => ({ ...t, dedupe_ignored: true })))).toEqual([])
   })
 
   it('matches within a ±3 day window but not beyond', () => {

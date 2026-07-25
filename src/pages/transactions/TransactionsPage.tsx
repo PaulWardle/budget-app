@@ -31,7 +31,7 @@ import {
   type TxnFilters,
 } from '@/lib/api'
 import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
-import { dedupeHash } from '@/lib/engine/duplicates'
+import { dedupeHash, findSavedDuplicateGroups } from '@/lib/engine/duplicates'
 import { normaliseDescription } from '@/lib/engine/recurring'
 import { supabase } from '@/lib/supabase'
 import { formatDate, money, todayIso } from '@/lib/format'
@@ -150,23 +150,31 @@ export default function TransactionsPage() {
     queryKey: ['transactions', effective],
     queryFn: () => fetchTransactions(effective),
   })
-  // Duplicates view: keep only transactions whose account+date+amount+
-  // normalised description occurs more than once in the ledger
+  // Duplicates view: likely-duplicate groups in the ledger. Rows whose
+  // running balances all differ are genuinely separate transactions and are
+  // not shown; user-dismissed pairs (dedupe_ignored) are skipped too.
   const txns = useMemo(() => {
     if (!rawTxns) return rawTxns
     if (!filters.duplicatesOnly) return rawTxns
-    const counts = new Map<string, number>()
-    for (const t of rawTxns) {
-      const h = dedupeHash({ accountId: t.account_id, date: t.date, amountMinor: t.amount_minor, description: t.description })
-      counts.set(h, (counts.get(h) ?? 0) + 1)
-    }
-    return rawTxns.filter(
-      (t) =>
-        (counts.get(
-          dedupeHash({ accountId: t.account_id, date: t.date, amountMinor: t.amount_minor, description: t.description }),
-        ) ?? 0) > 1,
-    )
+    return findSavedDuplicateGroups(rawTxns).flat()
   }, [rawTxns, filters.duplicatesOnly])
+
+  // "These are both real" — dismiss a whole matching group from the
+  // duplicates view (and the Data Quality count) without deleting anything.
+  const dismissDuplicateGroup = useMutation({
+    mutationFn: async (t: Transaction) => {
+      const hash = dedupeHash({ accountId: t.account_id, date: t.date, amountMinor: t.amount_minor, description: t.description })
+      const ids = (rawTxns ?? [])
+        .filter(
+          (x) =>
+            dedupeHash({ accountId: x.account_id, date: x.date, amountMinor: x.amount_minor, description: x.description }) === hash,
+        )
+        .map((x) => x.id)
+      const { error } = await supabase.from('transactions').update({ dedupe_ignored: true }).in('id', ids)
+      if (error) throw new Error(error.message)
+    },
+    onSuccess: () => invalidate(),
+  })
 
   // Bulk categorisation groups: uncategorised transactions clustered by merchant
   const bulkGroups = useMemo(() => {
@@ -407,7 +415,8 @@ export default function TransactionsPage() {
       {filters.duplicatesOnly && (
         <p className="mb-3 rounded-xl bg-warn/10 px-3 py-2 text-xs text-warn">
           Showing only transactions that appear more than once (same account, date, amount and
-          description). Open one and delete it if it's a genuine duplicate.
+          description). Open one and delete it if it's a genuine duplicate — or use “Keep both”
+          if they're really separate payments.
         </p>
       )}
 
@@ -434,6 +443,26 @@ export default function TransactionsPage() {
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {filters.duplicatesOnly && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="rounded-full border border-border px-2 py-0.5 text-[11px] font-medium text-ink-muted hover:border-accent hover:text-accent"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    dismissDuplicateGroup.mutate(t)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      dismissDuplicateGroup.mutate(t)
+                    }
+                  }}
+                >
+                  Keep both — not duplicates
+                </span>
+              )}
               {t.is_transfer && <Badge>transfer</Badge>}
               {t.is_reimbursable && <Badge tone="accent">reimbursable</Badge>}
               {t.exclude_from_budget && !t.is_transfer && <Badge>excluded</Badge>}

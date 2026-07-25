@@ -10,7 +10,7 @@ import {
   undoImportBatch,
 } from '@/lib/api'
 import { processUpload } from '@/lib/importFlow'
-import { dedupeHash } from '@/lib/engine/duplicates'
+import { findSavedDuplicateGroups, type SavedTxnLike } from '@/lib/engine/duplicates'
 import { formatDateTime, relativeDays } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Camera, FileUp, Loader2, Upload } from 'lucide-react'
@@ -248,14 +248,6 @@ function QualityRow({ ok, label, link }: { ok: boolean; label: string; link?: st
   )
 }
 
-function countPossibleDuplicates(txns: { date: string; amount_minor: number; description: string; account_id: string }[]): number {
-  const seen = new Map<string, number>()
-  let count = 0
-  for (const t of txns) {
-    const key = dedupeHash({ accountId: t.account_id, date: t.date, amountMinor: t.amount_minor, description: t.description })
-    const n = seen.get(key) ?? 0
-    if (n === 1) count++
-    seen.set(key, n + 1)
-  }
-  return count
+function countPossibleDuplicates(txns: SavedTxnLike[]): number {
+  return findSavedDuplicateGroups(txns).length
 }

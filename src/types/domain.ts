@@ -118,6 +118,7 @@ export interface Transaction {
   liability_id: string | null
   confidence: number | null
   needs_review: boolean
+  dedupe_ignored: boolean
   source: string
   transaction_splits?: TransactionSplit[]
 }

@@ -90,6 +90,47 @@ export function findDuplicates(
   return matches.sort((a, b) => b.score - a.score)
 }
 
+export interface SavedTxnLike {
+  id: string
+  account_id: string
+  date: string
+  amount_minor: number
+  description: string
+  running_balance_minor?: number | null
+  dedupe_ignored?: boolean
+}
+
+/** Group SAVED transactions into likely-duplicate sets for review.
+ * Matches the import-time rescue rule: rows that all carry different running
+ * balances are genuinely separate transactions (the balance moved between
+ * them — e.g. two daily interest charges posted on the same day), so they
+ * are not flagged. User-dismissed rows (dedupe_ignored) are skipped. */
+export function findSavedDuplicateGroups<T extends SavedTxnLike>(txns: T[]): T[][] {
+  const groups = new Map<string, T[]>()
+  for (const t of txns) {
+    if (t.dedupe_ignored) continue
+    const key = dedupeHash({
+      accountId: t.account_id,
+      date: t.date,
+      amountMinor: t.amount_minor,
+      description: t.description,
+    })
+    const g = groups.get(key) ?? []
+    g.push(t)
+    groups.set(key, g)
+  }
+  const out: T[][] = []
+  for (const g of groups.values()) {
+    if (g.length < 2) continue
+    const balances = g
+      .map((t) => t.running_balance_minor)
+      .filter((b): b is number => b != null)
+    if (balances.length === g.length && new Set(balances).size === g.length) continue
+    out.push(g)
+  }
+  return out
+}
+
 function tokenSimilarity(a: string, b: string): number {
   if (a === b) return 1
   const ta = new Set(a.split(' ').filter(Boolean))
