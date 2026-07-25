@@ -90,6 +90,16 @@ const actionSchemas = {
     subcategory_name: z.string().max(120).nullish(),
     apply_to_past: z.boolean().default(true),
   }),
+  create_category: z.object({
+    name: z.string().min(1).max(120),
+    parent_name: z.string().max(120).nullish(),
+  }),
+  update_category: z.object({
+    category_name: z.string().min(1).max(120),
+    new_name: z.string().max(120).nullish(),
+    new_parent_name: z.string().max(120).nullish(),
+    make_top_level: z.boolean().default(false),
+  }),
   create_recurring_payment: z.object({
     name: z.string().min(1).max(120),
     kind: z.enum(['bill', 'subscription', 'income', 'debt_payment', 'savings']),
@@ -294,6 +304,34 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
         apply_to_past: { type: 'boolean' },
       },
       required: ['merchant_name', 'alias_patterns'],
+    },
+  },
+  {
+    name: 'create_category',
+    description:
+      'Create a new category, optionally under a parent (the parent is created too if missing). Use whenever the user wants a category that does not exist yet.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        parent_name: { type: 'string', description: 'Optional parent; omit for a top-level category' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'update_category',
+    description:
+      'Rename a category and/or move it under a different parent (or to top level). Transactions keep their categorisation and every stat recalculates automatically.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        category_name: { type: 'string', description: 'The category to change, by name' },
+        new_name: { type: 'string' },
+        new_parent_name: { type: 'string', description: 'Move under this parent (created if missing)' },
+        make_top_level: { type: 'boolean', description: 'Move to top level instead' },
+      },
+      required: ['category_name'],
     },
   },
   {
@@ -571,6 +609,82 @@ async function executeAction(
         undoable: true,
       }
     }
+    case 'create_category': {
+      const i = input as z.infer<(typeof actionSchemas)['create_category']>
+      const { data: cats } = await supabase.from('categories').select('id,name,parent_id').eq('is_archived', false)
+      const all = (cats ?? []) as { id: string; name: string; parent_id: string | null }[]
+      let parentId: string | null = null
+      let parentName: string | null = null
+      if (i.parent_name) {
+        let parent = all.find((c) => !c.parent_id && c.name.toLowerCase() === i.parent_name!.toLowerCase())
+        if (!parent) {
+          const { data: created, error } = await supabase
+            .from('categories')
+            .insert({ user_id: userId, name: i.parent_name, kind: 'expense' })
+            .select('id,name,parent_id')
+            .single()
+          if (error) throw new Error(error.message)
+          parent = created as typeof parent
+        }
+        parentId = parent!.id
+        parentName = parent!.name
+      }
+      const existing = all.find(
+        (c) => c.name.toLowerCase() === i.name.toLowerCase() && (c.parent_id ?? null) === parentId,
+      )
+      if (existing) {
+        return {
+          summary: `Category ${parentName ? `${parentName} → ` : ''}${existing.name} already exists`,
+          undoData: null,
+          undoable: false,
+        }
+      }
+      const { data, error } = await supabase
+        .from('categories')
+        .insert({ user_id: userId, name: i.name, parent_id: parentId, kind: 'expense' })
+        .select('id')
+        .single()
+      if (error) throw new Error(error.message)
+      return {
+        summary: `Created category ${parentName ? `${parentName} → ` : ''}${i.name}`,
+        undoData: { table: 'categories', id: data.id },
+        undoable: true,
+      }
+    }
+    case 'update_category': {
+      const i = input as z.infer<(typeof actionSchemas)['update_category']>
+      const { data: cats } = await supabase.from('categories').select('id,name,parent_id').eq('is_archived', false)
+      const all = (cats ?? []) as { id: string; name: string; parent_id: string | null }[]
+      const matches = all.filter((c) => c.name.toLowerCase() === i.category_name.toLowerCase())
+      // Prefer a top-level match when the name is ambiguous
+      const target = matches.find((c) => !c.parent_id) ?? matches[0]
+      if (!target) throw new Error(`Category "${i.category_name}" not found`)
+      const patch: Record<string, unknown> = {}
+      if (i.new_name) patch.name = i.new_name
+      if (i.make_top_level) patch.parent_id = null
+      else if (i.new_parent_name) {
+        let parent = all.find((c) => !c.parent_id && c.name.toLowerCase() === i.new_parent_name!.toLowerCase())
+        if (!parent) {
+          const { data: created, error } = await supabase
+            .from('categories')
+            .insert({ user_id: userId, name: i.new_parent_name, kind: 'expense' })
+            .select('id,name,parent_id')
+            .single()
+          if (error) throw new Error(error.message)
+          parent = created as typeof parent
+        }
+        if (parent!.id === target.id) throw new Error('A category cannot be its own parent')
+        patch.parent_id = parent!.id
+      }
+      if (Object.keys(patch).length === 0) throw new Error('Nothing to change — give a new name or a new parent')
+      const { error } = await supabase.from('categories').update(patch).eq('id', target.id)
+      if (error) throw new Error(error.message)
+      return {
+        summary: `Updated category ${target.name}${i.new_name ? ` → renamed to ${i.new_name}` : ''}${i.new_parent_name && !i.make_top_level ? `, now under ${i.new_parent_name}` : ''}${i.make_top_level ? ', now top-level' : ''}`,
+        undoData: { table: 'categories', id: target.id, previous: { name: target.name, parent_id: target.parent_id } },
+        undoable: true,
+      }
+    }
     case 'create_merchant_rule': {
       const i = input as z.infer<(typeof actionSchemas)['create_merchant_rule']>
       // Resolve category by name (and optional subcategory)
@@ -578,9 +692,18 @@ async function executeAction(
       if (i.category_name) {
         const { data: cats } = await supabase.from('categories').select('*').eq('is_archived', false)
         const all = (cats ?? []) as { id: string; name: string; parent_id: string | null }[]
-        const parent = all.find(
+        let parent = all.find(
           (c) => !c.parent_id && c.name.toLowerCase() === i.category_name!.toLowerCase(),
         )
+        // The named category not existing is not a reason to fail — create it.
+        if (!parent) {
+          const { data: created } = await supabase
+            .from('categories')
+            .insert({ user_id: userId, name: i.category_name, kind: 'expense' })
+            .select('id,name,parent_id')
+            .single()
+          parent = (created as typeof parent) ?? undefined
+        }
         if (i.subcategory_name) {
           let sub = all.find(
             (c) =>
@@ -822,6 +945,7 @@ Core rules:
 - When the user states a debt balance, create or update a structured liability record — never leave it as conversation only. Balances you record this way are "user-stated"; calculated balances are estimates, and lender settlement figures may differ — say so when relevant.
 - When the user teaches you a merchant meaning, use create_merchant_rule AND create_financial_fact.
 - When the user reports a miscategorisation ("Tesco Bank was marked as groceries but it's my loan"), fix it yourself: create_merchant_rule with the right category and apply_to_past=true recategorises the history AND prevents it recurring. Confirm how many transactions were fixed. Never just explain how to do it manually.
+- You can create, rename and reorganise categories yourself (create_category, update_category), and create_merchant_rule creates any category it names that doesn't exist. Never send the user to Settings to manage categories — do it, then verify with find_transactions if the user doubts a change stuck.
 - When an amount is mentioned without currency, assume GBP.
 - Transfers between the user's own accounts are not spending.
 - Be concise and factual. Use British English and £. Never moralise about ordinary spending.
