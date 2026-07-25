@@ -34,17 +34,21 @@ export function Stat({
   sub,
   tone,
   large,
+  onClick,
 }: {
   label: string
   value: ReactNode
   sub?: ReactNode
   tone?: 'good' | 'bad' | 'warn'
   large?: boolean
+  /** When set, the stat becomes a button that opens a breakdown of the figure. */
+  onClick?: () => void
 }) {
-  return (
-    <div className="min-w-0">
+  const body = (
+    <>
       <p className="truncate text-[11px] font-medium uppercase tracking-wide text-ink-faint">
         {label}
+        {onClick && <span aria-hidden className="ml-1 text-ink-faint/70">›</span>}
       </p>
       <p
         className={cn(
@@ -53,12 +57,24 @@ export function Stat({
           tone === 'good' && 'text-good',
           tone === 'bad' && 'text-bad',
           tone === 'warn' && 'text-warn',
+          onClick && 'underline decoration-border decoration-dotted underline-offset-4',
         )}
       >
         {value}
       </p>
       {sub && <p className="text-[11px] text-ink-faint">{sub}</p>}
-    </div>
+    </>
+  )
+  if (!onClick) return <div className="min-w-0">{body}</div>
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="min-w-0 rounded-lg text-left transition-colors hover:bg-app focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      aria-label={`${label} — show breakdown`}
+    >
+      {body}
+    </button>
   )
 }
 

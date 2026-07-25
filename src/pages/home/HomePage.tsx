@@ -16,13 +16,25 @@ import { categoryActuals, budgetSummary, lineStatuses } from '@/lib/engine/budge
 import { expandRecurring, projectDailyBalances, safeToSpend, type ProjectedItem } from '@/lib/engine/cashflow'
 import { computeNetWorth } from '@/lib/engine/networth'
 import { daysInMonthOf, formatDateShort, formatDateTime, money, monthStartIso, todayIso } from '@/lib/format'
+import { DrillDown, type DrillRow } from '@/components/shared/drilldown'
 import { LIQUID_ACCOUNT_TYPES } from '@/types/domain'
 import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
+
+type Drill = {
+  title: string
+  rows: DrillRow[]
+  note?: string
+  linkTo?: string
+  linkLabel?: string
+  emptyHint?: string
+}
 
 export default function HomePage() {
   const month = monthStartIso()
   const today = todayIso()
+  const [drill, setDrill] = useState<Drill | null>(null)
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: liabilities } = useQuery({ queryKey: ['liabilities'], queryFn: fetchLiabilities })
   const { data: txns } = useQuery({
@@ -76,6 +88,43 @@ export default function HomePage() {
   const dayOfMonth = Number(today.slice(8, 10))
   const daysInMonth = daysInMonthOf(month)
 
+  // The exact rows the figures above were summed from — same exclusions as the
+  // engine (transfers, budget-excluded and reimbursable rows are left out), and
+  // splits contribute per split. Drill-downs read from this so the totals in a
+  // breakdown always reconcile with the headline that opened it.
+  const contributions = txns.flatMap((t) => {
+    if (t.is_transfer || t.exclude_from_budget || t.is_reimbursable) return []
+    const splits = t.transaction_splits ?? []
+    const base = {
+      date: t.date,
+      label: t.merchant_name ?? t.description,
+      description: t.description,
+      recurringId: t.recurring_payment_id,
+    }
+    if (splits.length > 0) {
+      return splits.map((s, i) => ({
+        ...base,
+        id: `${t.id}:${i}`,
+        categoryId: s.category_id,
+        amountMinor: s.amount_minor,
+      }))
+    }
+    return [{ ...base, id: t.id, categoryId: t.category_id, amountMinor: t.amount_minor }]
+  })
+
+  const toRows = (list: typeof contributions): DrillRow[] =>
+    [...list]
+      .sort((a, b) => Math.abs(b.amountMinor) - Math.abs(a.amountMinor))
+      .map((c) => ({
+        id: c.id,
+        date: c.date,
+        label: c.label,
+        sub: categoryLabel(categories, c.categoryId),
+        amountMinor: c.amountMinor,
+      }))
+
+  const monthRange = `from=${month}&to=${today}`
+
   const lines = budget
     ? lineStatuses(
         budget.budget_lines.map((l) => ({
@@ -100,10 +149,15 @@ export default function HomePage() {
   const donutTop = donutSource.slice(0, 5).map((a) => ({
     name: categoryLabel(categories, a.categoryId),
     value: a.spentMinor / 100,
+    categoryIds: [a.categoryId],
   }))
   const donutRest = donutSource.slice(5)
   if (donutRest.length > 0) {
-    donutTop.push({ name: 'Other', value: donutRest.reduce((s2, a) => s2 + a.spentMinor, 0) / 100 })
+    donutTop.push({
+      name: 'Other',
+      value: donutRest.reduce((s2, a) => s2 + a.spentMinor, 0) / 100,
+      categoryIds: donutRest.map((a) => a.categoryId),
+    })
   }
   const donutColors = assignColors(donutTop.map((d) => d.name), dark)
 
@@ -150,8 +204,45 @@ export default function HomePage() {
       <Card>
         <CardTitle>Financial position</CardTitle>
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-          <Stat large label="Cash" value={money(cash)} />
-          <Stat large label="Savings" value={money(savings)} />
+          <Stat
+            large
+            label="Cash"
+            value={money(cash)}
+            onClick={() =>
+              setDrill({
+                title: 'Cash',
+                rows: accounts
+                  .filter((a) => ['current', 'cash', 'wallet'].includes(a.account_type) && !a.archived_at)
+                  .map((a) => ({
+                    id: a.id,
+                    label: a.name,
+                    sub: `${a.account_type} · updated ${formatDateShort(a.balance_updated_at.slice(0, 10))}`,
+                    amountMinor: a.balance_minor,
+                  })),
+                note: 'Balances come from the latest running balance on each account’s imported statements, or whatever you set manually in Wealth.',
+                emptyHint: 'No current, cash or wallet accounts yet.',
+              })
+            }
+          />
+          <Stat
+            large
+            label="Savings"
+            value={money(savings)}
+            onClick={() =>
+              setDrill({
+                title: 'Savings',
+                rows: accounts
+                  .filter((a) => a.account_type === 'savings')
+                  .map((a) => ({
+                    id: a.id,
+                    label: a.name,
+                    sub: `updated ${formatDateShort(a.balance_updated_at.slice(0, 10))}`,
+                    amountMinor: a.balance_minor,
+                  })),
+                emptyHint: 'No savings accounts yet.',
+              })
+            }
+          />
           <Stat
             large
             label="Net worth"
@@ -174,6 +265,26 @@ export default function HomePage() {
                 ? `before income on ${formatDateShort(sts.nextPaydayDate)}`
                 : 'next 30 days of commitments covered'
             }
+            onClick={() =>
+              setDrill({
+                title: 'Safe to spend',
+                rows: [
+                  { id: 'cash', label: 'Cash available now', amountMinor: cash },
+                  ...upcoming.map((u, i) => ({
+                    id: `u${i}`,
+                    date: u.date,
+                    label: u.name,
+                    sub: 'known commitment',
+                    amountMinor: u.amountMinor,
+                  })),
+                ],
+                note: `Cash today, less every known commitment ${
+                  sts.nextPaydayDate ? `before your next income on ${formatDateShort(sts.nextPaydayDate)}` : 'in the next 30 days'
+                }. Commitments come from your bills — anything not set up as a bill isn’t counted here.`,
+                linkTo: '/cashflow',
+                linkLabel: 'See the full projection in Cashflow',
+              })
+            }
           />
         </div>
         {sts.negativeDays.length > 0 && (
@@ -190,13 +301,72 @@ export default function HomePage() {
           This month · day {dayOfMonth} of {daysInMonth}
         </CardTitle>
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-          <Stat label="Income received" value={money(incomeReceived)} />
-          <Stat label="Spending to date" value={money(spendingToDate)} />
-          <Stat label="Bills paid" value={`${billsPaid.length}`} sub={money(billsPaid.reduce((s, t) => s + -t.amount_minor, 0))} />
+          <Stat
+            label="Income received"
+            value={money(incomeReceived)}
+            onClick={() =>
+              setDrill({
+                title: 'Income received this month',
+                rows: toRows(contributions.filter((c) => c.amountMinor > 0)),
+                note: 'Money in since the 1st. Transfers between your own accounts, reimbursable items and anything excluded from budgeting are left out.',
+                linkTo: `/transactions?${monthRange}`,
+                emptyHint: 'No income recorded this month yet.',
+              })
+            }
+          />
+          <Stat
+            label="Spending to date"
+            value={money(spendingToDate)}
+            onClick={() =>
+              setDrill({
+                title: 'Spending this month',
+                rows: toRows(contributions.filter((c) => c.amountMinor < 0)),
+                note: 'Largest first. Transfers between your own accounts, reimbursable items and anything excluded from budgeting are left out.',
+                linkTo: `/transactions?${monthRange}`,
+                emptyHint: 'No spending recorded this month yet.',
+              })
+            }
+          />
+          <Stat
+            label="Bills paid"
+            value={`${billsPaid.length}`}
+            sub={money(billsPaid.reduce((s, t) => s + -t.amount_minor, 0))}
+            onClick={() =>
+              setDrill({
+                title: 'Bills paid this month',
+                rows: billsPaid.map((t) => ({
+                  id: t.id,
+                  date: t.date,
+                  label: t.merchant_name ?? t.description,
+                  sub: categoryLabel(categories, t.category_id),
+                  amountMinor: t.amount_minor,
+                })),
+                note: 'Transactions this month that matched one of your bills.',
+                linkTo: '/bills',
+                linkLabel: 'Manage bills',
+                emptyHint: 'No bills matched yet. Set them up on the Bills page and they’ll tick off automatically.',
+              })
+            }
+          />
           <Stat
             label="Bills still due"
             value={`${dueThisMonth.length}`}
             sub={money(dueThisMonth.reduce((s, u) => s + -u.amountMinor, 0))}
+            onClick={() =>
+              setDrill({
+                title: 'Bills still due this month',
+                rows: dueThisMonth.map((u, i) => ({
+                  id: `d${i}`,
+                  date: u.date,
+                  label: u.name,
+                  amountMinor: u.amountMinor,
+                })),
+                note: 'Expected from your bill schedule between today and month end.',
+                linkTo: '/bills',
+                linkLabel: 'Manage bills',
+                emptyHint: 'Nothing else expected before month end.',
+              })
+            }
           />
           {summary && (
             <>
@@ -289,13 +459,38 @@ export default function HomePage() {
             </div>
             <div className="w-full flex-1 space-y-1">
               {donutTop.map((d) => (
-                <div key={d.name} className="flex items-center justify-between text-xs">
+                <button
+                  key={d.name}
+                  type="button"
+                  onClick={() =>
+                    setDrill({
+                      title: d.name,
+                      rows: toRows(
+                        contributions.filter(
+                          (c) => c.amountMinor < 0 && d.categoryIds.includes(c.categoryId),
+                        ),
+                      ),
+                      note:
+                        d.name === 'Other'
+                          ? 'Every category outside the top five this month.'
+                          : 'Everything filed under this category this month.',
+                      linkTo:
+                        d.categoryIds.length === 1 && d.categoryIds[0]
+                          ? `/transactions?category=${d.categoryIds[0]}&${monthRange}`
+                          : `/transactions?${monthRange}`,
+                    })
+                  }
+                  className="flex w-full items-center justify-between rounded-md px-1 py-0.5 text-xs transition-colors hover:bg-app"
+                >
                   <span className="flex items-center gap-1.5">
                     <span className="inline-block h-2 w-2 rounded-full" style={{ background: donutColors.get(d.name) }} />
                     {d.name}
                   </span>
-                  <span className="tnum text-ink-muted">{money(Math.round(d.value * 100))}</span>
-                </div>
+                  <span className="tnum text-ink-muted">
+                    {money(Math.round(d.value * 100))}
+                    <span aria-hidden className="ml-1 text-ink-faint/70">›</span>
+                  </span>
+                </button>
               ))}
               <p className="pt-1 text-[11px] text-ink-faint">
                 Largest: {donutTop[0].name} at {money(Math.round(donutTop[0].value * 100))} of {money(spendingToDate)} total
@@ -346,6 +541,17 @@ export default function HomePage() {
           </div>
         )}
       </Card>
+
+      <DrillDown
+        open={drill !== null}
+        onClose={() => setDrill(null)}
+        title={drill?.title ?? ''}
+        rows={drill?.rows ?? []}
+        note={drill?.note}
+        linkTo={drill?.linkTo}
+        linkLabel={drill?.linkLabel}
+        emptyHint={drill?.emptyHint}
+      />
     </div>
   )
 }
