@@ -14,7 +14,7 @@ import {
 import { formatDate, formatDateTime } from '@/lib/format'
 import { supabase } from '@/lib/supabase'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Download, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { Check, ChevronDown, Download, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 
 export default function SettingsPage() {
@@ -100,6 +100,7 @@ export default function SettingsPage() {
   })
 
   const [editingCat, setEditingCat] = useState<{ id: string; name: string } | null>(null)
+  const [expandedCat, setExpandedCat] = useState<string | null>(null)
   const [catMsg, setCatMsg] = useState<string | null>(null)
 
   const renameCategory = useMutation({
@@ -205,65 +206,79 @@ export default function SettingsPage() {
       <Card>
         <CardTitle>Categories</CardTitle>
         <p className="mb-2 text-xs text-ink-muted">
-          Rename with the pencil, remove with the bin. Removing a category that's in use archives
-          it (past transactions keep their label); an unused one is deleted outright.
+          Tap a category to rename it, remove it or manage its subcategories. Removing one that's
+          in use archives it (past transactions keep their label); an unused one is deleted.
         </p>
         {catMsg && <p className="mb-2 text-xs text-accent">{catMsg}</p>}
-        <div className="mb-3 divide-y divide-border">
+        <div className="mb-3 divide-y divide-border rounded-xl border border-border">
           {(categories ?? [])
             .filter((c) => !c.parent_id)
             .map((parent) => {
               const subs = (categories ?? []).filter((c) => c.parent_id === parent.id)
-              const row = (c: { id: string; name: string }, isSub: boolean) =>
-                editingCat?.id === c.id ? (
-                  <span key={c.id} className="flex items-center gap-1">
-                    <Input
-                      autoFocus
-                      className="h-7 w-40 text-xs"
-                      value={editingCat.name}
-                      onChange={(e) => setEditingCat({ id: c.id, name: e.target.value })}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && editingCat.name.trim()) renameCategory.mutate(editingCat)
-                        if (e.key === 'Escape') setEditingCat(null)
-                      }}
-                    />
-                    <button
-                      className="text-good"
-                      onClick={() => editingCat.name.trim() && renameCategory.mutate(editingCat)}
-                      aria-label="Save name"
-                    >
-                      <Check className="h-3.5 w-3.5" />
-                    </button>
-                    <button className="text-ink-faint" onClick={() => setEditingCat(null)} aria-label="Cancel">
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </span>
-                ) : (
-                  <span
-                    key={c.id}
-                    className={`group inline-flex items-center gap-1 ${isSub ? 'rounded-full border border-border px-2 py-0.5 text-[11px] text-ink-muted' : 'text-sm font-medium'}`}
-                  >
-                    {c.name}
-                    <button
-                      className="text-ink-faint hover:text-accent"
-                      onClick={() => setEditingCat({ id: c.id, name: c.name })}
-                      aria-label={`Rename ${c.name}`}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </button>
-                    <button
-                      className="text-ink-faint hover:text-bad"
-                      onClick={() => removeCategory.mutate(c.id)}
-                      aria-label={`Remove ${c.name}`}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  </span>
-                )
+              const open = expandedCat === parent.id
+              const editRow = (c: { id: string; name: string }, isSub: boolean) => (
+                <div key={c.id} className="flex items-center justify-between gap-2 py-1">
+                  {editingCat?.id === c.id ? (
+                    <span className="flex flex-1 items-center gap-1.5">
+                      <Input
+                        autoFocus
+                        className="h-8 text-sm"
+                        value={editingCat.name}
+                        onChange={(e) => setEditingCat({ id: c.id, name: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && editingCat.name.trim()) renameCategory.mutate(editingCat)
+                          if (e.key === 'Escape') setEditingCat(null)
+                        }}
+                      />
+                      <Button size="sm" variant="secondary" onClick={() => editingCat.name.trim() && renameCategory.mutate(editingCat)}>
+                        <Check className="h-3.5 w-3.5" /> Save
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setEditingCat(null)}>
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    </span>
+                  ) : (
+                    <>
+                      <span className={isSub ? 'text-sm text-ink-muted' : 'text-sm font-medium'}>
+                        {isSub ? `↳ ${c.name}` : c.name}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <Button size="sm" variant="ghost" onClick={() => setEditingCat({ id: c.id, name: c.name })}>
+                          <Pencil className="h-3.5 w-3.5" /> Rename
+                        </Button>
+                        <Button size="sm" variant="ghost" className="text-bad" onClick={() => removeCategory.mutate(c.id)}>
+                          <Trash2 className="h-3.5 w-3.5" /> Remove
+                        </Button>
+                      </span>
+                    </>
+                  )}
+                </div>
+              )
               return (
-                <div key={parent.id} className="flex flex-wrap items-center gap-2 py-1.5">
-                  {row(parent, false)}
-                  {subs.map((s) => row(s, true))}
+                <div key={parent.id}>
+                  <button
+                    className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium hover:bg-surface-2"
+                    onClick={() => {
+                      setExpandedCat(open ? null : parent.id)
+                      setEditingCat(null)
+                    }}
+                  >
+                    <span>
+                      {parent.name}
+                      {subs.length > 0 && (
+                        <span className="ml-2 text-[11px] font-normal text-ink-faint">
+                          {subs.map((s) => s.name).join(' · ')}
+                        </span>
+                      )}
+                    </span>
+                    <ChevronDown className={`h-4 w-4 text-ink-faint transition-transform ${open ? 'rotate-180' : ''}`} />
+                  </button>
+                  {open && (
+                    <div className="border-t border-border bg-surface-2/50 px-3 py-2">
+                      {editRow(parent, false)}
+                      {subs.map((s) => editRow(s, true))}
+                    </div>
+                  )}
                 </div>
               )
             })}
