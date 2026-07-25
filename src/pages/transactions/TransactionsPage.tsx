@@ -268,7 +268,7 @@ export default function TransactionsPage() {
           <button
             key={p.key}
             onClick={() => pickPreset(p.key)}
-            className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`flex-1 whitespace-nowrap rounded-full px-3 py-1.5 text-center text-xs font-medium transition-colors ${
               preset === p.key
                 ? 'grad-accent text-white'
                 : 'border border-border bg-surface text-ink-muted hover:text-ink'
