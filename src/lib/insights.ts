@@ -246,13 +246,16 @@ export async function generateInsights(
   // alone right up until ordinary spending finishes the account off.
   const today = now.toISOString().slice(0, 10)
   const forecastTxns = txns.map((t) => ({
+    id: t.id,
     date: t.date,
+    merchant: t.merchant_name ?? t.description,
     amountMinor: t.amount_minor,
     categoryId: t.category_id,
     isTransfer: t.is_transfer,
     excludeFromBudget: t.exclude_from_budget,
     isReimbursable: t.is_reimbursable,
     recurringPaymentId: t.recurring_payment_id,
+    isOneOff: t.is_one_off,
   }))
   const baseline = everydayBaseline(forecastTxns, today)
   if (baseline.monthsUsed >= 2) {

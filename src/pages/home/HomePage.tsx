@@ -194,13 +194,16 @@ export default function HomePage() {
 
   // Behaviour-based forecast: bills alone never explain where a month lands.
   const toForecastTxn = (t: (typeof txns)[number]) => ({
+    id: t.id,
     date: t.date,
+    merchant: t.merchant_name ?? t.description,
     amountMinor: t.amount_minor,
     categoryId: t.category_id,
     isTransfer: t.is_transfer,
     excludeFromBudget: t.exclude_from_budget,
     isReimbursable: t.is_reimbursable,
     recurringPaymentId: t.recurring_payment_id,
+    isOneOff: t.is_one_off,
   })
   const baseline = everydayBaseline((history ?? []).map(toForecastTxn), today)
   const monthEndIso = `${month.slice(0, 8)}${String(daysInMonth).padStart(2, '0')}`

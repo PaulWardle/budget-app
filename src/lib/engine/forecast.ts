@@ -14,14 +14,18 @@ import type { ProjectedItem } from './cashflow'
 import type { Minor } from './money'
 
 export interface ForecastTxn {
+  id?: string
   date: string // ISO
   amountMinor: Minor // negative = out
   categoryId: string | null
+  merchant?: string
   isTransfer: boolean
   excludeFromBudget: boolean
   isReimbursable?: boolean
   /** Set when the transaction is one of the user's bills — projected separately. */
   recurringPaymentId?: string | null
+  /** Marked unusual by the user: it happened, but it shouldn't set expectations. */
+  isOneOff?: boolean
 }
 
 export interface BaselineMonth {
@@ -40,6 +44,12 @@ export interface EverydayBaseline {
   highMinor: Minor
   byCategory: { categoryId: string | null; perMonthMinor: Minor }[]
   confidence: 'high' | 'medium' | 'low'
+  /**
+   * Every transaction the baseline was measured from, largest first. A forecast
+   * nobody can inspect is a forecast nobody can correct — this is what backs
+   * the "what's in this number?" view, where a one-off can be taken out.
+   */
+  contributors: ForecastTxn[]
 }
 
 const monthOf = (iso: string): string => iso.slice(0, 7)
@@ -64,7 +74,8 @@ function isEveryday(t: ForecastTxn): boolean {
     !t.isTransfer &&
     !t.excludeFromBudget &&
     !t.isReimbursable &&
-    !t.recurringPaymentId
+    !t.recurringPaymentId &&
+    !t.isOneOff
   )
 }
 
@@ -107,6 +118,7 @@ export function everydayBaseline(
       highMinor: 0,
       byCategory: [],
       confidence: 'low',
+      contributors: [],
     }
   }
 
@@ -135,6 +147,9 @@ export function everydayBaseline(
     highMinor: Math.max(...values),
     byCategory,
     confidence: months.length >= 3 ? 'high' : months.length === 2 ? 'medium' : 'low',
+    contributors: txns
+      .filter((t) => isEveryday(t) && keep.has(monthOf(t.date)))
+      .sort((a, b) => a.amountMinor - b.amountMinor),
   }
 }
 

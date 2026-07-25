@@ -50,6 +50,21 @@ describe('everydayBaseline', () => {
     expect(b.perMonthMinor).toBe(50000)
   })
 
+  it('leaves out anything the user marked as a one-off', () => {
+    const b = everydayBaseline(
+      [...threeMonths, { ...txn('2026-05-20', -28000), isOneOff: true }],
+      '2026-07-25',
+    )
+    expect(b.perMonthMinor).toBe(50000) // the £280 tattoo does not lift the median
+    expect(b.contributors.some((c) => c.amountMinor === -28000)).toBe(false)
+  })
+
+  it('lists what it measured, largest first, so it can be checked', () => {
+    const b = everydayBaseline(threeMonths, '2026-07-25')
+    expect(b.contributors).toHaveLength(3)
+    expect(b.contributors[0].amountMinor).toBe(-60000)
+  })
+
   it('reports low confidence with no complete months', () => {
     const b = everydayBaseline([txn('2026-07-02', -1000)], '2026-07-25')
     expect(b.monthsUsed).toBe(0)

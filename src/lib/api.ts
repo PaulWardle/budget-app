@@ -566,6 +566,12 @@ export async function fetchRecurring(): Promise<RecurringPayment[]> {
   return (data ?? []) as RecurringPayment[]
 }
 
+/** Mark a transaction as unusual so it stops shaping the spending forecast. */
+export async function setTransactionOneOff(id: string, isOneOff: boolean): Promise<void> {
+  const { error } = await supabase.from('transactions').update({ is_one_off: isOneOff }).eq('id', id)
+  throwIf(error)
+}
+
 export interface DismissedRecurring {
   id: string
   match_key: string

@@ -1,7 +1,9 @@
 import { chartAxis, dateTooltipLabel, gridStroke, tooltipStyle } from '@/components/charts/theme'
 import { PageHeader, Stat } from '@/components/shared/common'
 import { Badge, Card, CardTitle, Spinner } from '@/components/ui/primitives'
-import { fetchAccounts, fetchRecurring, fetchTransactions } from '@/lib/api'
+import { BaselineInspector } from '@/components/shared/BaselineInspector'
+import { fetchAccounts, fetchCategories, fetchRecurring, fetchTransactions } from '@/lib/api'
+import type { Transaction } from '@/types/domain'
 import {
   expandRecurring,
   projectDailyBalances,
@@ -27,6 +29,8 @@ export default function CashflowPage() {
   const today = todayIso()
   const month = monthStartIso()
   const [includeTypical, setIncludeTypical] = useState(true)
+  const [inspecting, setInspecting] = useState(false)
+  const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: recurring } = useQuery({ queryKey: ['recurring'], queryFn: fetchRecurring })
   const { data: txns } = useQuery({
@@ -40,7 +44,7 @@ export default function CashflowPage() {
     queryFn: () => fetchTransactions({ from: historyFrom, limit: 3000 }),
   })
 
-  if (!accounts || !recurring || !txns || !history) return <Spinner />
+  if (!accounts || !recurring || !txns || !history || !categories) return <Spinner />
 
   const opening = accounts
     .filter((a) => a.include_in_cashflow && ['current', 'cash', 'wallet'].includes(a.account_type))
@@ -66,18 +70,12 @@ export default function CashflowPage() {
     )
   // What everyday spending has actually been, projected forward. Without this
   // the line only falls on bill dates and reads far healthier than reality.
-  const baseline = everydayBaseline(
-    history.map((t) => ({
-      date: t.date,
-      amountMinor: t.amount_minor,
-      categoryId: t.category_id,
-      isTransfer: t.is_transfer,
-      excludeFromBudget: t.exclude_from_budget,
-      isReimbursable: t.is_reimbursable,
-      recurringPaymentId: t.recurring_payment_id,
-    })),
-    today,
-  )
+  const baseline = everydayBaseline(history.map(toForecastTxn), today)
+  // Already-excluded one-offs, so they can be put back from the same place.
+  const excludedOneOffs = history
+    .filter((t) => t.is_one_off && t.amount_minor < 0 && !t.is_transfer)
+    .map(toForecastTxn)
+    .sort((a, b) => a.amountMinor - b.amountMinor)
   const typical = includeTypical ? typicalSpendItems(baseline.perDayMinor, today, horizon) : []
   const allItems = [...items, ...typical]
 
@@ -88,15 +86,7 @@ export default function CashflowPage() {
   const forecast = forecastMonthEnd({
     today,
     currentBalanceMinor: opening,
-    monthTxns: txns.map((t) => ({
-      date: t.date,
-      amountMinor: t.amount_minor,
-      categoryId: t.category_id,
-      isTransfer: t.is_transfer,
-      excludeFromBudget: t.exclude_from_budget,
-      isReimbursable: t.is_reimbursable,
-      recurringPaymentId: t.recurring_payment_id,
-    })),
+    monthTxns: txns.map(toForecastTxn),
     baseline,
     remainingScheduled: items.filter((i) => i.date > today && i.date <= monthEnd),
   })
@@ -187,7 +177,18 @@ export default function CashflowPage() {
               <p className="mt-3 text-[11px] text-ink-faint">
                 Everyday spend excludes your bills, transfers and anything marked reimbursable.
                 Measured across {baseline.months.map((m) => money(m.totalMinor)).join(', ')} — the
-                middle month is used, so one unusual month doesn't skew it.
+                middle month is used, so one unusual month doesn't skew it.{' '}
+                <button
+                  type="button"
+                  onClick={() => setInspecting(true)}
+                  className="text-accent underline hover:no-underline"
+                >
+                  See the {baseline.contributors.length} transactions behind this
+                </button>
+                {excludedOneOffs.length > 0 && (
+                  <> · {excludedOneOffs.length} already marked one-off and left out</>
+                )}
+                .
                 {forecast.paceRatio >= 1.25 && (
                   <span className="text-warn">
                     {' '}
@@ -329,6 +330,16 @@ export default function CashflowPage() {
           )}
         </div>
       </Card>
+
+      <BaselineInspector
+        open={inspecting}
+        onClose={() => setInspecting(false)}
+        contributors={baseline.contributors}
+        excluded={excludedOneOffs}
+        categories={categories}
+        perMonthMinor={baseline.perMonthMinor}
+        monthsUsed={baseline.monthsUsed}
+      />
     </div>
   )
 }
@@ -337,6 +348,21 @@ function isoPlus(iso: string, days: number): string {
   const d = new Date(`${iso}T00:00:00Z`)
   d.setUTCDate(d.getUTCDate() + days)
   return d.toISOString().slice(0, 10)
+}
+
+function toForecastTxn(t: Transaction) {
+  return {
+    id: t.id,
+    date: t.date,
+    amountMinor: t.amount_minor,
+    categoryId: t.category_id,
+    merchant: t.merchant_name ?? t.description,
+    isTransfer: t.is_transfer,
+    excludeFromBudget: t.exclude_from_budget,
+    isReimbursable: t.is_reimbursable,
+    recurringPaymentId: t.recurring_payment_id,
+    isOneOff: t.is_one_off,
+  }
 }
 
 function isoMonthsAgo(months: number): string {

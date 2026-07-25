@@ -14,6 +14,7 @@ import {
 import { generateInsights } from '@/lib/insights'
 import { everydayBaseline, forecastMonthEnd } from '@/lib/engine/forecast'
 import { expandRecurring } from '@/lib/engine/cashflow'
+import { splitRegularSpend } from '@/lib/engine/regular'
 import { daysInMonthOf, formatDate, money, todayIso } from '@/lib/format'
 import type { Insight } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -141,6 +142,25 @@ export default function InsightsPage() {
   const merchantLabel = (t: { merchant_name: string | null; description: string }) =>
     (t.merchant_name ?? t.description).trim()
 
+  // Habitual spending vs one-offs across the selected range. A YTD total that
+  // mixes weekly food shops with a one-off tattoo describes no actual month.
+  const regularSplit = useMemo(() => {
+    if (!txns) return null
+    return splitRegularSpend(
+      txns.map((t) => ({
+        id: t.id,
+        date: t.date,
+        merchant: (t.merchant_name ?? t.description).trim(),
+        amountMinor: t.amount_minor,
+        categoryId: parentOf.get(t.category_id ?? '')?.id ?? t.category_id,
+        isTransfer: t.is_transfer,
+        excludeFromBudget: t.exclude_from_budget,
+        isReimbursable: t.is_reimbursable,
+        recurringPaymentId: t.recurring_payment_id,
+      })),
+    )
+  }, [txns, parentOf])
+
   // Live forward view. Insights below are "something happened"; this is "where
   // the month is heading", recomputed on every render rather than stored.
   const outlook = useMemo(() => {
@@ -148,13 +168,16 @@ export default function InsightsPage() {
     const today = todayIso()
     const monthStart = `${today.slice(0, 7)}-01`
     const map = (t: (typeof historyTxns)[number]) => ({
+      id: t.id,
       date: t.date,
+      merchant: t.merchant_name ?? t.description,
       amountMinor: t.amount_minor,
       categoryId: t.category_id,
       isTransfer: t.is_transfer,
       excludeFromBudget: t.exclude_from_budget,
       isReimbursable: t.is_reimbursable,
       recurringPaymentId: t.recurring_payment_id,
+      isOneOff: t.is_one_off,
     })
     const baseline = everydayBaseline(historyTxns.map(map), today)
     const cash = accounts
@@ -190,7 +213,7 @@ export default function InsightsPage() {
     for (const t of historyTxns) {
       if (t.date < monthStart) continue
       if (t.is_transfer || t.exclude_from_budget || t.is_reimbursable) continue
-      if (t.recurring_payment_id || t.amount_minor >= 0) continue
+      if (t.recurring_payment_id || t.amount_minor >= 0 || t.is_one_off) continue
       const key = parentOf.get(t.category_id ?? '')?.id ?? t.category_id
       spentByCat.set(key, (spentByCat.get(key) ?? 0) + -t.amount_minor)
     }
@@ -496,6 +519,102 @@ export default function InsightsPage() {
           </div>
         </div>
       </Card>
+
+      {regularSplit && regularSplit.regular.length > 0 && (
+        <Card>
+          <CardTitle>Running costs vs one-offs</CardTitle>
+          <p className="mb-3 text-xs text-ink-muted">
+            Shops you return to most months are a running cost you can plan around. Everything else
+            — a tattoo, a sofa, a repair — is a one-off and shouldn't be averaged into a monthly
+            figure. Bills are counted separately. Over {regularSplit.monthsInRange} month
+            {regularSplit.monthsInRange === 1 ? '' : 's'}, a shop counts as regular once it appears
+            in {regularSplit.threshold} or more of them.
+          </p>
+          <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <div>
+              <p className="text-[11px] uppercase tracking-wide text-ink-faint">Running costs</p>
+              <p className="tnum text-base font-semibold">{money(regularSplit.regularTotalMinor)}</p>
+              <p className="text-[11px] text-ink-faint">
+                {money(regularSplit.regularPerMonthMinor)} a month
+              </p>
+            </div>
+            <div>
+              <p className="text-[11px] uppercase tracking-wide text-ink-faint">One-offs</p>
+              <p className="tnum text-base font-semibold">{money(regularSplit.adHocTotalMinor)}</p>
+              <p className="text-[11px] text-ink-faint">{regularSplit.adHoc.length} separate items</p>
+            </div>
+            <div>
+              <p className="text-[11px] uppercase tracking-wide text-ink-faint">Regular share</p>
+              <p className="tnum text-base font-semibold">
+                {regularSplit.regularTotalMinor + regularSplit.adHocTotalMinor > 0
+                  ? Math.round(
+                      (regularSplit.regularTotalMinor /
+                        (regularSplit.regularTotalMinor + regularSplit.adHocTotalMinor)) *
+                        100,
+                    )
+                  : 0}
+                %
+              </p>
+              <p className="text-[11px] text-ink-faint">of everyday spending</p>
+            </div>
+          </div>
+
+          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-ink-faint">
+            Running costs by category
+          </p>
+          <div className="space-y-1">
+            {regularSplit.byCategory.slice(0, 8).map((c) => (
+              <button
+                key={c.categoryId ?? 'none'}
+                type="button"
+                onClick={() => drill({ cat: c.categoryId ?? 'none', merchant: null })}
+                className="flex w-full items-center justify-between rounded-md px-1 py-0.5 text-xs transition-colors hover:bg-app"
+              >
+                <span>
+                  {categoryLabel(categories, c.categoryId)}
+                  <span className="ml-1.5 text-ink-faint">
+                    {c.merchants} shop{c.merchants === 1 ? '' : 's'}
+                  </span>
+                </span>
+                <span className="tnum text-ink-muted">
+                  {money(c.perMonthMinor)}/mo · {money(c.regularMinor)} total
+                  <ChevronRight className="ml-1 inline h-3 w-3 text-ink-faint" />
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <details className="mt-3">
+            <summary className="cursor-pointer text-xs text-ink-faint">
+              The {regularSplit.adHoc.length} one-offs, largest first
+            </summary>
+            <div className="mt-2 space-y-1">
+              {regularSplit.adHoc.slice(0, 15).map((r) => (
+                <button
+                  key={r.merchant}
+                  type="button"
+                  onClick={() => drill({ cat: r.categoryId ?? 'none', merchant: r.merchant })}
+                  className="flex w-full items-center justify-between rounded-md px-1 py-0.5 text-xs transition-colors hover:bg-app"
+                >
+                  <span className="truncate">
+                    {r.merchant}
+                    <span className="ml-1.5 text-ink-faint">
+                      {formatDate(r.lastDate)}
+                      {r.txnCount > 1 ? ` · ${r.txnCount} payments` : ''}
+                    </span>
+                  </span>
+                  <span className="tnum shrink-0 text-ink-muted">{money(r.totalMinor)}</span>
+                </button>
+              ))}
+              {regularSplit.adHoc.length > 15 && (
+                <p className="px-1 pt-1 text-[11px] text-ink-faint">
+                  Showing the 15 largest of {regularSplit.adHoc.length}.
+                </p>
+              )}
+            </div>
+          </details>
+        </Card>
+      )}
 
       {/* ------------------------------------------------ spending explorer */}
       {(selCat || selMerchant) && (

@@ -119,6 +119,8 @@ export interface Transaction {
   confidence: number | null
   needs_review: boolean
   dedupe_ignored: boolean
+  /** Unusual spend: counted in the month, but ignored when measuring what's typical. */
+  is_one_off: boolean
   source: string
   transaction_splits?: TransactionSplit[]
 }
