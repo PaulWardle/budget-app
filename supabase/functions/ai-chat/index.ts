@@ -283,12 +283,12 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
   {
     name: 'create_merchant_rule',
     description:
-      'Learn a merchant categorisation, e.g. "Voy is my monthly TRT" → merchant Voy, category Health, subcategory TRT, alias patterns like VOY. Applies to future imports and optionally past transactions.',
+      'Learn a merchant categorisation, e.g. "Acme Gym is my monthly gym membership" → merchant Acme Gym, category Health, subcategory Fitness, alias patterns like ACME GYM. Applies to future imports and optionally past transactions.',
     input_schema: {
       type: 'object',
       properties: {
         merchant_name: { type: 'string' },
-        alias_patterns: { type: 'array', items: { type: 'string' }, description: 'Uppercase substrings that match bank descriptions, e.g. ["VOY"]' },
+        alias_patterns: { type: 'array', items: { type: 'string' }, description: 'Uppercase substrings that match bank descriptions, e.g. ["ACME GYM"]' },
         category_name: { type: 'string' },
         subcategory_name: { type: 'string' },
         apply_to_past: { type: 'boolean' },
@@ -816,7 +816,7 @@ const SYSTEM_PROMPT = `You are the financial assistant inside My Money, a privat
 
 Core rules:
 - NEVER invent financial numbers. To answer spending questions, ALWAYS call find_transactions and use its computed totals. The app's deterministic engine owns all calculations.
-- For direct, explicit user statements ("Voy is my monthly TRT", "I still owe £500 on PayPal", "I paid an extra £100 off my loan"), perform the action immediately, then confirm what was saved, where, and any assumptions made. Undo is available for your actions.
+- For direct, explicit user statements ("that payment is my monthly gym membership", "I still owe £500 on PayPal", "I paid an extra £100 off my loan"), perform the action immediately, then confirm what was saved, where, and any assumptions made. Undo is available for your actions.
 - For inferred conclusions (you suspect something is recurring, you're unsure which account/debt is meant), ask for confirmation first instead of acting.
 - When the user states a debt balance, create or update a structured liability record — never leave it as conversation only. Balances you record this way are "user-stated"; calculated balances are estimates, and lender settlement figures may differ — say so when relevant.
 - When the user teaches you a merchant meaning, use create_merchant_rule AND create_financial_fact.

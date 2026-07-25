@@ -13,7 +13,7 @@ import { useNavigate } from 'react-router-dom'
 const SUGGESTIONS = [
   'Let me tell you about my finances…',
   'How much did I spend eating out last month?',
-  'Voy is my monthly TRT.',
+  'That £30 payment is my monthly gym membership.',
   'I still owe £500 on PayPal.',
   'What bills are due before payday?',
   'I paid an extra £100 off my loan today.',

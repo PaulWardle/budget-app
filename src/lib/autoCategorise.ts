@@ -110,7 +110,6 @@ const RULES: BuiltinRule[] = [
   { match: ['SUPERDRUG'], merchant: 'Superdrug', path: ['Health', 'Pharmacy'] },
   { match: ['PUREGYM', 'PURE GYM'], merchant: 'PureGym', path: ['Health', 'Fitness'] },
   { match: ['THE GYM GROUP', 'JD GYMS', 'DAVID LLOYD', 'NUFFIELD'], merchant: 'Gym', path: ['Health', 'Fitness'] },
-  { match: ['VOY '], merchant: 'Voy', path: ['Health', 'TRT'] },
 
   // --- cash & fees ---
   { match: ['CASH WITHDRAWAL', 'ATM WITHDRAWAL', 'LINK ATM', 'CASH AT '], merchant: 'Cash withdrawal', path: ['Cash withdrawal'] },

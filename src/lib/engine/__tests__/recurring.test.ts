@@ -3,7 +3,7 @@ import { detectRecurring, normaliseDescription } from '../recurring'
 
 describe('normaliseDescription', () => {
   it('strips references and punctuation', () => {
-    expect(normaliseDescription('VOY HEALTH *8842 REF 0091')).toBe('VOY HEALTH REF')
+    expect(normaliseDescription('ACME GYM *8842 REF 0091')).toBe('ACME GYM REF')
     expect(normaliseDescription('TESCO STORES 2841')).toBe('TESCO STORES')
   })
 })
@@ -11,10 +11,10 @@ describe('normaliseDescription', () => {
 describe('detectRecurring', () => {
   it('detects a monthly subscription with slight date drift', () => {
     const txns = [
-      { date: '2026-03-03', amountMinor: -4900, description: 'VOY HEALTH' },
-      { date: '2026-04-03', amountMinor: -4900, description: 'VOY HEALTH' },
-      { date: '2026-05-04', amountMinor: -4900, description: 'VOY HEALTH' },
-      { date: '2026-06-03', amountMinor: -4900, description: 'VOY HEALTH' },
+      { date: '2026-03-03', amountMinor: -4900, description: 'ACME GYM' },
+      { date: '2026-04-03', amountMinor: -4900, description: 'ACME GYM' },
+      { date: '2026-05-04', amountMinor: -4900, description: 'ACME GYM' },
+      { date: '2026-06-03', amountMinor: -4900, description: 'ACME GYM' },
     ]
     const [c] = detectRecurring(txns)
     expect(c).toBeDefined()

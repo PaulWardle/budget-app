@@ -219,7 +219,7 @@ export default function SettingsPage() {
         </p>
         <Textarea
           rows={6}
-          placeholder={'e.g. I get paid ~£2,600 on the 28th. Car finance with Santander, £11k left, £297/month. Voy is my monthly TRT (£49). Motorcycling spending is my hobby money. Saving for a £10k emergency fund.'}
+          placeholder={'e.g. I get paid on the 28th. Car finance with £11k left at £297/month. My gym membership is £30/month. Eating out is my main discretionary spend. Saving for a £10k emergency fund.'}
           value={notesValue}
           onChange={(e) => {
             setNotes(e.target.value)
@@ -238,7 +238,7 @@ export default function SettingsPage() {
         <CardTitle>Remembered financial facts</CardTitle>
         {(facts ?? []).length === 0 ? (
           <p className="text-xs text-ink-faint">
-            Facts the AI learns ("Voy is my TRT", "payday is the 28th") appear here for review.
+            Facts the AI learns ("payday is the 28th", "rent is £950 on the 1st") appear here for review.
           </p>
         ) : (
           <div className="space-y-1.5">

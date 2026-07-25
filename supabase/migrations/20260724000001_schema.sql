@@ -345,7 +345,7 @@ create table public.financial_facts (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
   fact_type text not null,              -- e.g. 'payday', 'merchant_meaning', 'debt_balance'
-  fact_key text not null,               -- e.g. 'salary_day', 'voy'
+  fact_key text not null,               -- e.g. 'salary_day', 'rent_amount'
   value jsonb not null,
   effective_date date not null default current_date,
   source text not null default 'user_chat'

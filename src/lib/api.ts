@@ -247,7 +247,7 @@ export function applyRules(
 }
 
 /** Create/find a merchant, alias, rule and optional recurring flag in one go —
- * the "Voy is my monthly TRT" learning primitive. Returns undo information. */
+ * the "this payment is my monthly gym membership" learning primitive. Returns undo information. */
 export async function learnMerchant(
   userId: string,
   input: {
