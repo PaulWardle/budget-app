@@ -94,7 +94,9 @@ export async function processUpload(
       const ruleHit = applyRules(t.description, rules)
       // Learned rules win; otherwise fall back to the built-in dictionary of
       // unmistakable merchants. Anything ambiguous stays uncategorised.
-      const builtin = ruleHit ? null : suggestFromDescription(t.description)
+      const builtin = ruleHit
+        ? null
+        : suggestFromDescription(t.merchant ? `${t.description} ${t.merchant}` : t.description)
       const builtinCategoryId = builtin ? resolveCategoryId(categories, builtin.path) : null
       const dupes = effectiveAccountId
         ? findDuplicates(
@@ -117,7 +119,7 @@ export async function processUpload(
         proposed_date: t.date,
         proposed_description: t.description,
         proposed_amount_minor: t.amountMinor,
-        proposed_merchant: builtin?.merchant ?? null,
+        proposed_merchant: t.merchant ?? builtin?.merchant ?? null,
         proposed_category_id: ruleHit?.categoryId ?? builtinCategoryId,
         running_balance_minor: t.balanceMinor,
         confidence: 0.98, // deterministic parse

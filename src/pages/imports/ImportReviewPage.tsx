@@ -304,6 +304,11 @@ export default function ImportReviewPage() {
                   possible duplicate ({Math.round((e.duplicateScore ?? 0) * 100)}% match) — tick to import anyway
                 </Badge>
               )}
+              {!e.duplicateOf && (e.duplicateScore ?? 0) >= 0.5 && (
+                <Badge tone="warn">
+                  similar to an existing transaction ({Math.round((e.duplicateScore ?? 0) * 100)}% match) — check
+                </Badge>
+              )}
               {e.runningBalanceMinor !== null && (
                 <span className="text-[11px] text-ink-faint">balance after: {money(e.runningBalanceMinor)}</span>
               )}
