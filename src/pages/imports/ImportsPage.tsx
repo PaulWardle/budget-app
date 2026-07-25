@@ -15,12 +15,11 @@ import { formatDateTime, relativeDays } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Camera, FileUp, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 
 export default function ImportsPage() {
   const userId = useUserId()
   const qc = useQueryClient()
-  const navigate = useNavigate()
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: batches, isLoading } = useQuery({
     queryKey: ['batches'],
@@ -43,29 +42,44 @@ export default function ImportsPage() {
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // The button is busy only while the file itself uploads (a second or two).
+  // Extraction continues in the background — the batch appears in the list as
+  // "processing" and the list polls until it flips to "review".
+  function startUpload(file: File): Promise<void> {
+    return new Promise((resolve) => {
+      let released = false
+      const release = () => {
+        if (!released) {
+          released = true
+          resolve()
+        }
+      }
+      processUpload(userId, file, accountId, {
+        onBatchCreated: () => {
+          qc.invalidateQueries({ queryKey: ['batches'] })
+          release()
+        },
+      })
+        .then((outcome) => {
+          if (outcome.status === 'failed') setError(outcome.error ?? `Import of ${outcome.fileName} failed`)
+        })
+        .catch((e: Error) => setError(e.message))
+        .finally(() => {
+          qc.invalidateQueries({ queryKey: ['batches'] })
+          release()
+        })
+    })
+  }
+
   const upload = useMutation({
     mutationFn: async (files: FileList) => {
-      let lastBatchId: string | null = null
-      for (const file of files) {
-        setStatus(`Processing ${file.name}…`)
-        const outcome = await processUpload(userId, file, accountId, {
-          onBatchCreated: () => qc.invalidateQueries({ queryKey: ['batches'] }),
-        })
-        if (outcome.status === 'failed') throw new Error(outcome.error ?? 'Import failed')
-        lastBatchId = outcome.batchId
-      }
-      if (lastBatchId) navigate(`/imports/${lastBatchId}`)
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['batches'] })
-      setStatus(null)
       setError(null)
+      for (const file of files) {
+        setStatus(`Uploading ${file.name}…`)
+        await startUpload(file)
+      }
     },
-    onError: (e: Error) => {
-      setStatus(null)
-      setError(e.message)
-      qc.invalidateQueries({ queryKey: ['batches'] })
-    },
+    onSettled: () => setStatus(null),
   })
 
   const undo = useMutation({
@@ -128,7 +142,7 @@ export default function ImportsPage() {
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => fileRef.current?.click()} disabled={upload.isPending}>
               <Upload className="h-4 w-4" />
-              {upload.isPending ? (status ?? 'Working…') : 'Choose files or photos'}
+              {upload.isPending ? (status ?? 'Uploading…') : 'Choose files or photos'}
             </Button>
             <Button variant="outline" onClick={() => cameraRef.current?.click()} disabled={upload.isPending}>
               <Camera className="h-4 w-4" /> Take photo

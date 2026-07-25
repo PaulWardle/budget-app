@@ -16,6 +16,14 @@ const EXTRACT_TXNS_TOOL: Anthropic.Beta.BetaTool = {
     additionalProperties: false,
     required: ['transactions'],
     properties: {
+      bank_name: {
+        type: ['string', 'null'],
+        description: 'The bank or provider this statement belongs to, if visible (e.g. "Halifax", "Monzo", "PayPal")',
+      },
+      account_hint: {
+        type: ['string', 'null'],
+        description: 'Any account identifier shown: last 4 digits, sort code, or account label',
+      },
       transactions: {
         type: 'array',
         items: {
@@ -124,7 +132,7 @@ Deno.serve(async (req) => {
   const tool = isContract ? EXTRACT_CONTRACT_TOOL : EXTRACT_TXNS_TOOL
   const prompt = isContract
     ? 'Extract the loan/credit agreement terms from this document. All money values in integer pence (£1,234.56 = 123456). Use null for anything not stated — never guess. Then call record_extracted_loan_terms exactly once.'
-    : `Extract every transaction visible in this bank statement. All amounts in integer pence; money out is NEGATIVE. Read dates carefully (UK format is day/month). Today is ${new Date().toISOString().slice(0, 10)} — infer missing years from context. Include partially-visible rows with low confidence rather than omitting them. Then call record_extracted_transactions exactly once.`
+    : `Extract every transaction visible in this bank statement. Also identify which bank or provider the statement is from, and any account number hint shown. All amounts in integer pence; money out is NEGATIVE. Read dates carefully (UK format is day/month). Today is ${new Date().toISOString().slice(0, 10)} — infer missing years from context. Include partially-visible rows with low confidence rather than omitting them. Then call record_extracted_transactions exactly once.`
 
   let extracted: Record<string, unknown> | null = null
   try {
@@ -180,6 +188,29 @@ Deno.serve(async (req) => {
     confidence: number
   }
   const txns = (extracted.transactions ?? []) as ExtractedTxn[]
+
+  // Auto-attribute the account: if the caller didn't pick one, match the
+  // extracted bank name against the user's accounts. Only a single
+  // unambiguous match is used — otherwise the review screen asks.
+  let accountId = body.account_id ?? null
+  const bankName = typeof extracted.bank_name === 'string' ? extracted.bank_name.trim() : ''
+  if (!accountId && bankName) {
+    const { data: accts } = await ctx.supabase
+      .from('accounts')
+      .select('id,name,provider')
+      .is('archived_at', null)
+    const bank = bankName.toUpperCase()
+    const matches = ((accts ?? []) as { id: string; name: string; provider: string | null }[]).filter(
+      (a) => {
+        const hay = `${a.name} ${a.provider ?? ''}`.toUpperCase()
+        return hay.includes(bank) || (a.provider ?? '').toUpperCase() === bank
+      },
+    )
+    if (matches.length === 1) {
+      accountId = matches[0].id
+      await ctx.supabase.from('import_batches').update({ account_id: accountId }).eq('id', body.batch_id)
+    }
+  }
   const valid = txns.filter(
     (t) =>
       /^\d{4}-\d{2}-\d{2}$/.test(t.date ?? '') &&
@@ -198,11 +229,11 @@ Deno.serve(async (req) => {
   // Existing ledger rows for duplicate detection (same account, date window)
   const dates = valid.map((t) => t.date).sort()
   let existing: { id: string; date: string; amount_minor: number; description: string; running_balance_minor: number | null }[] = []
-  if (body.account_id && dates.length > 0) {
+  if (accountId && dates.length > 0) {
     const { data } = await ctx.supabase
       .from('transactions')
       .select('id,date,amount_minor,description,running_balance_minor')
-      .eq('account_id', body.account_id)
+      .eq('account_id', accountId)
       .gte('date', shiftDays(dates[0], -3))
       .lte('date', shiftDays(dates[dates.length - 1], 3))
     existing = (data ?? []) as typeof existing
@@ -269,7 +300,7 @@ Deno.serve(async (req) => {
       status: items.length > 0 ? 'review' : 'failed',
       error: items.length > 0 ? null : 'No transactions could be read from this file',
       ai_model: MODEL,
-      stats: { extracted: items.length, skipped: txns.length - valid.length },
+      stats: { extracted: items.length, skipped: txns.length - valid.length, ...(bankName ? { bank: bankName } : {}) },
     })
     .eq('id', body.batch_id)
 

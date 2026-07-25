@@ -89,9 +89,9 @@ export default function ImportReviewPage() {
   const confirm = useMutation({
     mutationFn: async () => {
       if (!batch) throw new Error('Batch not found')
-      const accountId = batch.account_id ?? pickedAccountId
+      const accountId = pickedAccountId ?? batch.account_id
       if (!accountId) throw new Error('Choose which account these transactions belong to first.')
-      if (!batch.account_id) {
+      if (accountId !== batch.account_id) {
         await supabase.from('import_batches').update({ account_id: accountId }).eq('id', batch.id)
       }
       const chosen = edits.filter((e) => e.include && e.amountMinor !== null && e.date && e.description)
@@ -219,29 +219,29 @@ export default function ImportReviewPage() {
         actions={
           <Button
             onClick={() => confirm.mutate()}
-            disabled={confirm.isPending || included === 0 || (!batch?.account_id && !pickedAccountId)}
+            disabled={confirm.isPending || included === 0 || !(pickedAccountId ?? batch?.account_id)}
           >
             {confirm.isPending ? 'Saving…' : `Save ${included} transactions`}
           </Button>
         }
       />
       {error && <p className="mb-3 text-xs text-bad">{error}</p>}
-      {batch && !batch.account_id && (
-        <Card className="mb-3">
-          <p className="mb-2 text-xs font-semibold">
-            Which account do these transactions belong to?
-          </p>
-          <div className="max-w-xs">
+      {batch && (
+        <Card className="mb-3 flex flex-wrap items-center gap-3 py-3">
+          <span className="text-xs font-semibold">Account</span>
+          <div className="w-56">
             <AccountSelect
               accounts={accounts ?? []}
-              value={pickedAccountId}
+              value={pickedAccountId ?? batch.account_id}
               onChange={setPickedAccountId}
               allowNone
             />
           </div>
-          <p className="mt-1 text-[11px] text-ink-faint">
-            The upload was made without an account — pick one to enable saving.
-          </p>
+          <span className="text-[11px] text-ink-faint">
+            {batch.account_id
+              ? 'Matched automatically — change if wrong.'
+              : 'Couldn’t match this statement to an account — pick one to enable saving.'}
+          </span>
         </Card>
       )}
       <p className="mb-3 text-xs text-ink-muted">

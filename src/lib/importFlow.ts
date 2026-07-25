@@ -3,7 +3,7 @@
 // images/PDFs go to the ai-extract edge function. Everything lands as
 // PROPOSED items for the review screen — nothing enters the ledger directly.
 
-import { applyRules, fetchCategories, fetchRules, fetchTransactions, recordAudit, uploadDocument } from '@/lib/api'
+import { applyRules, fetchAccounts, fetchCategories, fetchRules, fetchTransactions, recordAudit, uploadDocument } from '@/lib/api'
 import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
 import { parseStatementCsv } from '@/lib/csv'
 import { findDuplicates } from '@/lib/engine/duplicates'
@@ -56,6 +56,22 @@ export async function processUpload(
 
   if (isCsv) {
     const text = await file.text()
+    // Auto-attribute the account from the filename/content when not chosen —
+    // e.g. "Monzo Data Export….csv" matches the user's Monzo account.
+    let effectiveAccountId = accountId
+    if (!effectiveAccountId) {
+      const accounts = await fetchAccounts()
+      const hay = `${file.name} ${text.slice(0, 1000)}`.toUpperCase()
+      const matches = accounts.filter((a) =>
+        [a.provider, a.name]
+          .filter((t): t is string => !!t && t.length >= 3)
+          .some((t) => hay.includes(t.toUpperCase())),
+      )
+      if (matches.length === 1) {
+        effectiveAccountId = matches[0].id
+        await supabase.from('import_batches').update({ account_id: effectiveAccountId }).eq('id', batch.id)
+      }
+    }
     const parsed = parseStatementCsv(text)
     if (parsed.error && parsed.transactions.length === 0) {
       await supabase.from('import_batches').update({ status: 'failed', error: parsed.error }).eq('id', batch.id)
@@ -63,8 +79,8 @@ export async function processUpload(
     }
     const rules = await fetchRules()
     const categories = await fetchCategories()
-    const ledger = accountId
-      ? await fetchTransactions({ accountId, limit: 2000 })
+    const ledger = effectiveAccountId
+      ? await fetchTransactions({ accountId: effectiveAccountId, limit: 2000 })
       : []
     const existing = ledger.map((t) => ({
       id: t.id,
@@ -80,10 +96,10 @@ export async function processUpload(
       // unmistakable merchants. Anything ambiguous stays uncategorised.
       const builtin = ruleHit ? null : suggestFromDescription(t.description)
       const builtinCategoryId = builtin ? resolveCategoryId(categories, builtin.path) : null
-      const dupes = accountId
+      const dupes = effectiveAccountId
         ? findDuplicates(
             {
-              accountId,
+              accountId: effectiveAccountId,
               date: t.date,
               amountMinor: t.amountMinor,
               description: t.description,
