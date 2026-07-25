@@ -45,6 +45,14 @@ describe('findDuplicates', () => {
     expect(m.reasons.join(' ')).toContain('running balance')
   })
 
+  it('flags same-day same-amount rows as likely duplicates even when the wording differs (CSV vs PDF)', () => {
+    const [m] = findDuplicates(
+      { accountId: 'halifax', date: '2026-07-10', amountMinor: -450, description: 'Card payment to SB Coffee' },
+      existing,
+    )
+    expect(m.score).toBeGreaterThanOrEqual(0.75)
+  })
+
   it('does not match across accounts or amounts', () => {
     expect(
       findDuplicates(

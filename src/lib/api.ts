@@ -328,6 +328,7 @@ export interface TxnFilters {
   accountId?: string
   categoryId?: string
   merchantId?: string
+  merchantName?: string
   search?: string
   from?: string
   to?: string
@@ -350,6 +351,10 @@ export async function fetchTransactions(filters: TxnFilters = {}): Promise<Trans
   if (filters.accountId) q = q.eq('account_id', filters.accountId)
   if (filters.categoryId) q = q.eq('category_id', filters.categoryId)
   if (filters.merchantId) q = q.eq('merchant_id', filters.merchantId)
+  if (filters.merchantName) {
+    const safe = filters.merchantName.replace(/[,()]/g, ' ').trim()
+    q = q.or(`merchant_name.ilike.%${safe}%,description.ilike.%${safe}%`)
+  }
   if (filters.from) q = q.gte('date', filters.from)
   if (filters.to) q = q.lte('date', filters.to)
   if (filters.uncategorised) q = q.is('category_id', null).eq('is_transfer', false)

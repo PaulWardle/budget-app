@@ -1,7 +1,7 @@
 import { AccountSelect, CategorySelect, ConfidenceBadge, MoneyInput, PageHeader } from '@/components/shared/common'
 import { Badge, Button, Card, Input, Spinner } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchAccounts, fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, recordAudit } from '@/lib/api'
+import { fetchAccounts, fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, recordAudit, updateAccount } from '@/lib/api'
 import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
 import { dedupeHash } from '@/lib/engine/duplicates'
 import { formatDate, money } from '@/lib/format'
@@ -118,6 +118,7 @@ export default function ImportReviewPage() {
       }
       let confirmedCount = 0
       let skippedDuplicates = 0
+      let latestBalance: { date: string; balanceMinor: number } | null = null
       for (const e of chosen) {
         const hash = dedupeHash({
           accountId,
@@ -150,6 +151,9 @@ export default function ImportReviewPage() {
           .select('id')
           .single()
         if (tErr) throw new Error(tErr.message)
+        if (e.runningBalanceMinor !== null && (!latestBalance || e.date >= latestBalance.date)) {
+          latestBalance = { date: e.date, balanceMinor: e.runningBalanceMinor }
+        }
         await supabase
           .from('imported_items')
           .update({
@@ -179,6 +183,18 @@ export default function ImportReviewPage() {
           .from('imported_items')
           .update({ status: e.duplicateOf ? 'duplicate' : 'rejected' })
           .eq('id', e.id)
+      }
+      // Statements carry the account's actual balance — feed it into Wealth.
+      // Only move the balance forward: an old statement never overwrites a
+      // balance that was updated more recently.
+      const acct = (accounts ?? []).find((a) => a.id === accountId)
+      if (
+        latestBalance &&
+        acct &&
+        latestBalance.date >= acct.balance_updated_at.slice(0, 10) &&
+        acct.balance_minor !== latestBalance.balanceMinor
+      ) {
+        await updateAccount(userId, accountId, { balance_minor: latestBalance.balanceMinor }, 'import').catch(() => {})
       }
       await supabase
         .from('import_batches')

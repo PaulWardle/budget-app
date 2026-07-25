@@ -370,8 +370,11 @@ async function runExtraction(
         t.running_balance_minor != null &&
         e.running_balance_minor != null &&
         t.running_balance_minor !== e.running_balance_minor
-      let score = sameNorm && dayDiff === 0 ? 1 : sameNorm ? 0.85 : dayDiff === 0 ? 0.6 : 0.5
-      if (balancesDisagree) score -= 0.35
+      // Same day + same amount on the same account is a likely duplicate even
+      // when the wording differs (CSV vs PDF renderings of one statement);
+      // disagreeing running balances rescue genuine repeat purchases.
+      let score = sameNorm && dayDiff === 0 ? 1 : sameNorm ? 0.85 : dayDiff === 0 ? 0.75 : 0.5
+      if (balancesDisagree) score -= 0.45
       if (score >= 0.5 && (duplicateScore === null || score > duplicateScore)) {
         duplicateScore = Math.min(1, score)
         duplicateOf = score >= 0.75 ? e.id : duplicateOf

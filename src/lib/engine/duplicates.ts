@@ -64,7 +64,11 @@ export function findDuplicates(
     score += sim * 0.3
     if (sim > 0.6) reasons.push('similar description')
     if (dayDiff === 0) {
-      score += 0.1
+      // Same account, same day, same amount is a likely duplicate even when
+      // the wording differs — CSV and PDF exports of the same statement
+      // describe the same transaction differently. Only disagreeing running
+      // balances (below) rescue it as a genuine separate purchase.
+      score += 0.25
       reasons.push('same day')
     }
     if (
@@ -77,7 +81,7 @@ export function findDuplicates(
       } else {
         // Different running balances on the same day strongly suggest two
         // genuine transactions (e.g. two identical coffees).
-        score -= 0.35
+        score -= 0.45
         reasons.push('different running balance — may be a separate purchase')
       }
     }

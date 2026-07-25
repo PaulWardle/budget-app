@@ -15,9 +15,9 @@ import { generateInsights } from '@/lib/insights'
 import { formatDate, money, todayIso } from '@/lib/format'
 import type { Insight } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw } from 'lucide-react'
+import { ChevronRight, RefreshCw } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   Bar,
   BarChart,
@@ -67,8 +67,26 @@ function rangeDates(key: string): { from: string; to: string } {
 export default function InsightsPage() {
   const userId = useUserId()
   const qc = useQueryClient()
-  const [range, setRange] = useState('month')
+  const [range, setRange] = useState('ytd')
   const { from, to } = useMemo(() => rangeDates(range), [range])
+  // Drill-down state lives in the URL so back button and sharing work:
+  // ?cat=<parent id> shows the shops within a category,
+  // ?cat=..&merchant=<name> shows one shop's months + transactions.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const selCat = searchParams.get('cat')
+  const selMerchant = searchParams.get('merchant')
+  const drill = (patch: { cat?: string | null; merchant?: string | null }) => {
+    const next = new URLSearchParams(searchParams)
+    if (patch.cat !== undefined) {
+      if (patch.cat === null) next.delete('cat')
+      else next.set('cat', patch.cat)
+    }
+    if (patch.merchant !== undefined) {
+      if (patch.merchant === null) next.delete('merchant')
+      else next.set('merchant', patch.merchant)
+    }
+    setSearchParams(next)
+  }
 
   const { data: insights, isLoading } = useQuery({ queryKey: ['insights'], queryFn: () => fetchInsights() })
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
@@ -104,32 +122,84 @@ export default function InsightsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['insights'] }),
   })
 
+  // Roll every category up to its top-level parent so "Shopping" includes
+  // Clothing, Alcohol etc. — the drill-down then breaks a parent apart.
+  const parentOf = useMemo(() => {
+    const tops = new Map<string, { id: string; name: string }>()
+    for (const c of categories ?? []) if (!c.parent_id) tops.set(c.id, { id: c.id, name: c.name })
+    const map = new Map<string, { id: string; name: string }>()
+    for (const c of categories ?? []) {
+      map.set(c.id, (c.parent_id ? tops.get(c.parent_id) : undefined) ?? { id: c.id, name: c.name })
+    }
+    return map
+  }, [categories])
+  const merchantLabel = (t: { merchant_name: string | null; description: string }) =>
+    (t.merchant_name ?? t.description).trim()
+
   const analytics = useMemo(() => {
     const rows = (txns ?? []).filter(
       (t) => !t.is_transfer && !t.exclude_from_analytics && !t.is_reimbursable,
     )
     const spend = rows.filter((t) => t.amount_minor < 0)
     const byCat = new Map<string, number>()
+    const roll = (id: string | null) => (id ? (parentOf.get(id)?.id ?? id) : 'none')
     for (const t of spend) {
       // Respect splits in analytics
       if (t.transaction_splits && t.transaction_splits.length > 0) {
         for (const s of t.transaction_splits) {
-          if (s.amount_minor < 0) byCat.set(s.category_id ?? 'none', (byCat.get(s.category_id ?? 'none') ?? 0) + -s.amount_minor)
+          if (s.amount_minor < 0) byCat.set(roll(s.category_id), (byCat.get(roll(s.category_id)) ?? 0) + -s.amount_minor)
         }
       } else {
-        byCat.set(t.category_id ?? 'none', (byCat.get(t.category_id ?? 'none') ?? 0) + -t.amount_minor)
+        byCat.set(roll(t.category_id), (byCat.get(roll(t.category_id)) ?? 0) + -t.amount_minor)
       }
     }
     const byMerchant = new Map<string, number>()
     for (const t of spend) {
-      const m = (t.merchant_name ?? t.description).trim()
+      const m = merchantLabel(t)
       byMerchant.set(m, (byMerchant.get(m) ?? 0) + -t.amount_minor)
     }
     const totalSpend = spend.reduce((s, t) => s + -t.amount_minor, 0)
     const totalIncome = rows.filter((t) => t.amount_minor > 0).reduce((s, t) => s + t.amount_minor, 0)
     const days = Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1)
-    return { byCat, byMerchant, totalSpend, totalIncome, days, count: spend.length }
-  }, [txns, from, to])
+    return { spend, byCat, byMerchant, totalSpend, totalIncome, days, count: spend.length }
+  }, [txns, from, to, parentOf])
+
+  // Level 1: the shops inside the selected category
+  const catMerchants = useMemo(() => {
+    if (!selCat) return []
+    const roll = (id: string | null) => (id ? (parentOf.get(id)?.id ?? id) : 'none')
+    const groups = new Map<string, { name: string; count: number; totalMinor: number }>()
+    for (const t of analytics.spend) {
+      if (roll(t.category_id) !== selCat) continue
+      const name = merchantLabel(t)
+      const g = groups.get(name.toLowerCase()) ?? { name, count: 0, totalMinor: 0 }
+      g.count++
+      g.totalMinor += -t.amount_minor
+      groups.set(name.toLowerCase(), g)
+    }
+    return [...groups.values()].sort((a, b) => b.totalMinor - a.totalMinor)
+  }, [analytics.spend, selCat, parentOf])
+
+  // Level 2: one shop — months + individual transactions
+  const merchantDetail = useMemo(() => {
+    if (!selMerchant) return null
+    const roll = (id: string | null) => (id ? (parentOf.get(id)?.id ?? id) : 'none')
+    const rows = analytics.spend.filter(
+      (t) =>
+        merchantLabel(t).toLowerCase() === selMerchant.toLowerCase() &&
+        (!selCat || roll(t.category_id) === selCat),
+    )
+    const byMonth = new Map<string, number>()
+    for (const t of rows) byMonth.set(t.date.slice(0, 7), (byMonth.get(t.date.slice(0, 7)) ?? 0) + -t.amount_minor)
+    const monthly = [...byMonth.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([k, v]) => ({
+        month: new Date(`${k}-01T00:00:00`).toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }),
+        Spend: Math.round(v) / 100,
+      }))
+    const totalMinor = rows.reduce((s, t) => s + -t.amount_minor, 0)
+    return { rows: rows.slice(0, 25), allCount: rows.length, monthly, totalMinor }
+  }, [analytics.spend, selMerchant, selCat, parentOf])
 
   if (isLoading || !categories) return <Spinner />
 
@@ -282,65 +352,182 @@ export default function InsightsPage() {
         </div>
       </Card>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Card>
-          <CardTitle>Spending by category</CardTitle>
-          {catData.length === 0 ? (
-            <p className="text-xs text-ink-faint">No spending in this range.</p>
-          ) : (
+      {/* ------------------------------------------------ spending explorer */}
+      {(selCat || selMerchant) && (
+        <nav className="flex flex-wrap items-center gap-1 text-xs">
+          <button className="text-accent hover:underline" onClick={() => drill({ cat: null, merchant: null })}>
+            All spending
+          </button>
+          {selCat && (
             <>
-              <p className="mb-1 text-xs text-ink-muted">
-                Largest: {catData[0]?.name} at {money(Math.round((catData[0]?.value ?? 0) * 100))}
-              </p>
-              <div className="h-44">
-                <ResponsiveContainer>
-                  <PieChart>
-                    <Pie data={catData} dataKey="value" nameKey="name" innerRadius={45} outerRadius={70} paddingAngle={2} stroke="var(--app-surface)" strokeWidth={2}>
-                      {catData.map((d) => (
-                        <Cell key={d.name} fill={catColors.get(d.name)} />
-                      ))}
-                    </Pie>
-                    <Tooltip contentStyle={tooltipStyle} formatter={gbpTooltip} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="mt-1 space-y-0.5">
-                {catData.map((d) => (
-                  <Link
-                    key={d.name}
-                    to={d.id !== 'other' && d.id !== 'none' ? `/transactions?category=${d.id}&from=${from}&to=${to}` : `/transactions?from=${from}&to=${to}`}
-                    className="flex items-center justify-between text-xs hover:text-accent"
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <span className="inline-block h-2 w-2 rounded-full" style={{ background: catColors.get(d.name) }} />
-                      {d.name}
-                    </span>
-                    <span className="tnum text-ink-muted">{money(Math.round(d.value * 100))}</span>
-                  </Link>
-                ))}
-              </div>
+              <ChevronRight className="h-3 w-3 text-ink-faint" />
+              <button
+                className={selMerchant ? 'text-accent hover:underline' : 'font-semibold'}
+                onClick={() => drill({ merchant: null })}
+              >
+                {categoryLabel(categories, selCat === 'none' ? null : selCat)}
+              </button>
             </>
           )}
-        </Card>
+          {selMerchant && (
+            <>
+              <ChevronRight className="h-3 w-3 text-ink-faint" />
+              <span className="font-semibold">{selMerchant}</span>
+            </>
+          )}
+        </nav>
+      )}
 
+      {selMerchant && merchantDetail ? (
         <Card>
-          <CardTitle>Top merchants</CardTitle>
-          {merchantData.length === 0 ? (
-            <p className="text-xs text-ink-faint">No spending in this range.</p>
-          ) : (
-            <div className="h-64">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <CardTitle>{selMerchant}</CardTitle>
+            <p className="text-xs text-ink-muted">
+              <span className="tnum font-semibold text-ink">{money(merchantDetail.totalMinor)}</span>
+              {' '}across {merchantDetail.allCount} transaction{merchantDetail.allCount === 1 ? '' : 's'} in this range
+            </p>
+          </div>
+          {merchantDetail.monthly.length > 0 && (
+            <div className="mt-2 h-40">
               <ResponsiveContainer>
-                <BarChart data={merchantData} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
-                  <XAxis type="number" tickFormatter={(v: number) => `£${Math.round(v)}`} tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }} stroke={gridStroke} />
-                  <YAxis type="category" dataKey="name" width={110} tick={{ ...chartAxis, fill: 'var(--app-ink-muted)' }} stroke={gridStroke} />
-                  <Tooltip contentStyle={tooltipStyle} formatter={(v: unknown) => [money(Math.round(Number(v ?? 0) * 100)), 'Spend']} />
-                  <Bar dataKey="value" fill="var(--app-accent)" radius={[0, 4, 4, 0]} barSize={14} />
+                <BarChart data={merchantDetail.monthly} margin={{ top: 4, right: 8, bottom: 0, left: 4 }}>
+                  <XAxis dataKey="month" tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }} stroke={gridStroke} />
+                  <YAxis tickFormatter={(v: number) => `£${v >= 1000 ? `${Math.round(v / 1000)}k` : Math.round(v)}`} tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }} stroke={gridStroke} width={44} />
+                  <Tooltip contentStyle={tooltipStyle} formatter={gbpTooltip} cursor={{ fill: 'color-mix(in srgb, var(--app-border) 40%, transparent)' }} />
+                  <Bar dataKey="Spend" fill="var(--app-accent)" radius={[4, 4, 0, 0]} barSize={18} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
           )}
+          <div className="mt-2 divide-y divide-border">
+            {merchantDetail.rows.map((t) => (
+              <div key={t.id} className="flex items-center justify-between py-1.5 text-xs">
+                <span className="text-ink-muted">{formatDate(t.date)}</span>
+                <span className="mx-2 flex-1 truncate">{t.description}</span>
+                <span className="tnum font-medium">{money(-t.amount_minor)}</span>
+              </div>
+            ))}
+          </div>
+          <Link
+            to={`/transactions?merchant=${encodeURIComponent(selMerchant)}&from=${from}&to=${to}`}
+            className="mt-2 inline-block text-xs text-accent hover:underline"
+          >
+            Open in Transactions ›
+          </Link>
         </Card>
-      </div>
+      ) : selCat ? (
+        <Card>
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <CardTitle>{categoryLabel(categories, selCat === 'none' ? null : selCat)} — by shop</CardTitle>
+            <p className="text-xs text-ink-muted">
+              <span className="tnum font-semibold text-ink">{money(analytics.byCat.get(selCat) ?? 0)}</span> in this range
+            </p>
+          </div>
+          {catMerchants.length === 0 ? (
+            <p className="text-xs text-ink-faint">No spending here in this range.</p>
+          ) : (
+            <div className="mt-1 divide-y divide-border">
+              {catMerchants.map((m) => (
+                <button
+                  key={m.name}
+                  onClick={() => drill({ merchant: m.name })}
+                  className="flex w-full items-center justify-between py-2 text-left text-sm hover:text-accent"
+                >
+                  <span className="truncate">
+                    {m.name}
+                    <span className="ml-2 text-[11px] text-ink-faint">×{m.count}</span>
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="tnum text-ink-muted">{money(m.totalMinor)}</span>
+                    <ChevronRight className="h-3.5 w-3.5 text-ink-faint" />
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+          {selCat !== 'none' && (
+            <Link
+              to={`/transactions?category=${selCat}&from=${from}&to=${to}`}
+              className="mt-2 inline-block text-xs text-accent hover:underline"
+            >
+              Open in Transactions ›
+            </Link>
+          )}
+        </Card>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Card>
+            <CardTitle>Spending by category</CardTitle>
+            {catData.length === 0 ? (
+              <p className="text-xs text-ink-faint">No spending in this range.</p>
+            ) : (
+              <>
+                <p className="mb-1 text-xs text-ink-muted">
+                  Tap a category to see which shops it went to.
+                </p>
+                <div className="h-44">
+                  <ResponsiveContainer>
+                    <PieChart>
+                      <Pie data={catData} dataKey="value" nameKey="name" innerRadius={45} outerRadius={70} paddingAngle={2} stroke="var(--app-surface)" strokeWidth={2}>
+                        {catData.map((d) => (
+                          <Cell
+                            key={d.name}
+                            fill={catColors.get(d.name)}
+                            cursor={d.id !== 'other' ? 'pointer' : undefined}
+                            onClick={() => d.id !== 'other' && drill({ cat: d.id })}
+                          />
+                        ))}
+                      </Pie>
+                      <Tooltip contentStyle={tooltipStyle} formatter={gbpTooltip} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-1 space-y-0.5">
+                  {catData.map((d) => (
+                    <button
+                      key={d.name}
+                      onClick={() => d.id !== 'other' && drill({ cat: d.id })}
+                      className="flex w-full items-center justify-between text-left text-xs hover:text-accent"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <span className="inline-block h-2 w-2 rounded-full" style={{ background: catColors.get(d.name) }} />
+                        {d.name}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="tnum text-ink-muted">{money(Math.round(d.value * 100))}</span>
+                        {d.id !== 'other' && <ChevronRight className="h-3 w-3 text-ink-faint" />}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </Card>
+
+          <Card>
+            <CardTitle>Top shops</CardTitle>
+            {merchantData.length === 0 ? (
+              <p className="text-xs text-ink-faint">No spending in this range.</p>
+            ) : (
+              <div className="mt-1 divide-y divide-border">
+                {merchantData.map((m) => (
+                  <button
+                    key={m.name}
+                    onClick={() => drill({ merchant: m.name })}
+                    className="flex w-full items-center justify-between py-1.5 text-left text-sm hover:text-accent"
+                  >
+                    <span className="truncate">{m.name}</span>
+                    <span className="flex items-center gap-1">
+                      <span className="tnum text-ink-muted">{money(Math.round(m.value * 100))}</span>
+                      <ChevronRight className="h-3.5 w-3.5 text-ink-faint" />
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Card>

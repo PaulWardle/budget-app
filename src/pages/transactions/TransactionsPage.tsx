@@ -30,6 +30,7 @@ import {
   updateTransaction,
   type TxnFilters,
 } from '@/lib/api'
+import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
 import { dedupeHash } from '@/lib/engine/duplicates'
 import { normaliseDescription } from '@/lib/engine/recurring'
 import { supabase } from '@/lib/supabase'
@@ -53,7 +54,7 @@ export default function TransactionsPage() {
   const filtersFromParams = (): TxnFilters & { duplicatesOnly?: boolean } => ({
     accountId: params.get('account') ?? undefined,
     categoryId: params.get('category') ?? undefined,
-    merchantId: params.get('merchant') ?? undefined,
+    merchantName: params.get('merchant') ?? undefined,
     from: params.get('from') ?? undefined,
     to: params.get('to') ?? undefined,
     uncategorised: params.get('uncategorised') === '1' || undefined,
@@ -131,6 +132,34 @@ export default function TransactionsPage() {
         categoryId: g.categoryId,
         source: 'manual',
       }).catch(() => {})
+    },
+    onSuccess: () => invalidate(),
+  })
+
+  // One tap: run the built-in dictionary of unmistakable shops over every
+  // uncategorised transaction on screen. Anything ambiguous stays flagged.
+  const autoFill = useMutation({
+    mutationFn: async () => {
+      const groups = new Map<string, { categoryId: string; merchant: string; keepName: boolean; ids: string[] }>()
+      for (const t of txns ?? []) {
+        if (t.category_id) continue
+        const s = suggestFromDescription(`${t.merchant_name ?? ''} ${t.description}`)
+        const categoryId = s ? resolveCategoryId(categories ?? [], s.path) : null
+        if (!s || !categoryId) continue
+        const keepName = !!t.merchant_name
+        const key = `${categoryId}|${s.merchant}|${keepName}`
+        const g = groups.get(key) ?? { categoryId, merchant: s.merchant, keepName, ids: [] }
+        g.ids.push(t.id)
+        groups.set(key, g)
+      }
+      let n = 0
+      for (const g of groups.values()) {
+        const patch = g.keepName ? { category_id: g.categoryId } : { category_id: g.categoryId, merchant_name: g.merchant }
+        const { error } = await supabase.from('transactions').update(patch).in('id', g.ids)
+        if (error) throw new Error(error.message)
+        n += g.ids.length
+      }
+      return n
     },
     onSuccess: () => invalidate(),
   })
@@ -245,6 +274,16 @@ export default function TransactionsPage() {
             Pick a category once per merchant; it applies to every matching transaction and is
             remembered for all future imports.
           </p>
+          <div className="mb-2">
+            <Button size="sm" variant="outline" disabled={autoFill.isPending} onClick={() => autoFill.mutate()}>
+              {autoFill.isPending ? 'Categorising…' : 'Auto-categorise obvious shops'}
+            </Button>
+            {autoFill.isSuccess && (
+              <span className="ml-2 text-[11px] text-ink-faint">
+                {autoFill.data} transaction{autoFill.data === 1 ? '' : 's'} categorised
+              </span>
+            )}
+          </div>
           <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
             {bulkGroups.map((g) => (
               <div key={g.name} className="flex items-center gap-2">
