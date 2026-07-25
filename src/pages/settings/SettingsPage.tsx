@@ -12,7 +12,9 @@ import {
   fetchErrors,
   fetchFacts,
   fetchProfile,
+  logAppError,
   updateProfile,
+  withTimeout,
 } from '@/lib/api'
 import { formatDate, formatDateTime } from '@/lib/format'
 import { supabase } from '@/lib/supabase'
@@ -36,6 +38,7 @@ export default function SettingsPage() {
   const [newCatParent, setNewCatParent] = useState<string>('')
   const [notes, setNotes] = useState<string | null>(null)
   const [notesMsg, setNotesMsg] = useState<string | null>(null)
+  const [notesErr, setNotesErr] = useState(false)
 
   const existingNotes = (facts ?? []).find(
     (f) => f.fact_type === 'context' && f.fact_key === 'user_notes',
@@ -43,31 +46,35 @@ export default function SettingsPage() {
   const notesValue = notes ?? ((existingNotes?.value as { text?: string } | undefined)?.text ?? '')
 
   const saveNotes = useMutation({
+    retry: false,
     mutationFn: async () => {
       const value = { text: (notes ?? '').slice(0, 6000) }
-      if (existingNotes) {
-        const { error } = await supabase
-          .from('financial_facts')
-          .update({ value, last_confirmed_at: new Date().toISOString() })
-          .eq('id', existingNotes.id)
-        if (error) throw new Error(error.message)
-      } else {
-        const { error } = await supabase.from('financial_facts').insert({
-          user_id: userId,
-          fact_type: 'context',
-          fact_key: 'user_notes',
-          value,
-          source: 'manual',
-          confidence: 'confirmed',
-        })
-        if (error) throw new Error(error.message)
-      }
+      const write = existingNotes
+        ? supabase
+            .from('financial_facts')
+            .update({ value, last_confirmed_at: new Date().toISOString() })
+            .eq('id', existingNotes.id)
+        : supabase.from('financial_facts').insert({
+            user_id: userId,
+            fact_type: 'context',
+            fact_key: 'user_notes',
+            value,
+            source: 'manual',
+            confidence: 'confirmed',
+          })
+      const { error } = await withTimeout(Promise.resolve(write), 15_000, 'save')
+      if (error) throw new Error(error.message)
     },
     onSuccess: () => {
+      setNotesErr(false)
       setNotesMsg('Saved — the AI will use this in every conversation.')
       qc.invalidateQueries({ queryKey: ['facts'] })
     },
-    onError: (e: Error) => setNotesMsg(e.message),
+    onError: (e: Error) => {
+      setNotesErr(true)
+      setNotesMsg(e.message)
+      void logAppError(userId, 'app', `Financial memory save failed: ${e.message}`)
+    },
   })
 
   const saveProfile = useMutation({
@@ -364,13 +371,16 @@ export default function SettingsPage() {
           onChange={(e) => {
             setNotes(e.target.value)
             setNotesMsg(null)
+            setNotesErr(false)
           }}
         />
         <div className="mt-2 flex items-center gap-3">
           <Button size="sm" onClick={() => saveNotes.mutate()} disabled={saveNotes.isPending || notes === null}>
             {saveNotes.isPending ? 'Saving…' : 'Save memory'}
           </Button>
-          {notesMsg && <span className="text-xs text-good">{notesMsg}</span>}
+          {notesMsg && (
+            <span className={`text-xs ${notesErr ? 'text-bad' : 'text-good'}`}>{notesMsg}</span>
+          )}
         </div>
       </Card>
 

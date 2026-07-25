@@ -37,6 +37,29 @@ function throwIf(error: { message: string } | null): void {
   if (error) throw new Error(error.message)
 }
 
+/**
+ * Reject if a request has not settled in time. A stalled connection — or a
+ * Supabase auth lock held by another tab — otherwise leaves a button spinning
+ * on "Saving…" forever with nothing to act on. Failing loudly is better than
+ * waiting silently.
+ */
+export async function withTimeout<T>(work: Promise<T>, ms = 15_000, what = 'request'): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`The ${what} timed out after ${Math.round(ms / 1000)}s. Check your connection and try again.`)),
+          ms,
+        )
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export async function recordAudit(input: {
   userId: string
   recordType: string

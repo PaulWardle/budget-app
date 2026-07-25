@@ -93,18 +93,22 @@ export function detectRecurring(txns: TxnLike[]): RecurringCandidate[] {
     // which also falls inside four-weekly's 28±2 window — first-match order
     // would file every monthly bill as four-weekly and over-count it by one
     // payment a year.
-    let best: (typeof FREQUENCIES)[number] | null = null
-    let bestError = Infinity
-    for (const f of FREQUENCIES) {
-      if (Math.abs(meanInterval - f.days) > f.tolerance) continue
-      if (!intervals.every((iv) => Math.abs(iv - f.days) <= f.tolerance * 2)) continue
-      const error = Math.abs(meanInterval - f.days) / f.days
-      if (error < bestError) {
-        best = f
-        bestError = error
-      }
+    const fits = FREQUENCIES.filter(
+      (f) =>
+        Math.abs(meanInterval - f.days) <= f.tolerance &&
+        intervals.every((iv) => Math.abs(iv - f.days) <= f.tolerance * 2),
+    ).map((f) => ({ f, error: Math.abs(meanInterval - f.days) / f.days }))
+    if (fits.length === 0) continue
+
+    let best = fits.reduce((a, b) => (b.error < a.error ? b : a))
+    // Monthly is overwhelmingly the common case, and the two windows overlap.
+    // Where monthly is a plausible reading, prefer it unless four-weekly fits
+    // more than twice as well — i.e. the dates really do walk backwards
+    // through the month rather than landing on the same date each time.
+    const monthly = fits.find((x) => x.f.name === 'monthly')
+    if (monthly && best.f.name === 'four_weekly' && best.error > monthly.error / 2) {
+      best = monthly
     }
-    if (!best) continue
 
     const amounts = sorted.map((t) => Math.abs(t.amountMinor))
     const median = [...amounts].sort((a, b) => a - b)[Math.floor(amounts.length / 2)]
@@ -114,7 +118,11 @@ export function detectRecurring(txns: TxnLike[]): RecurringCandidate[] {
     const last = sorted[sorted.length - 1]
     const avg = Math.round(amounts.reduce((a, b) => a + b, 0) / amounts.length)
     const intervalConsistency =
-      1 - Math.min(1, intervals.reduce((a, iv) => a + Math.abs(iv - best!.days), 0) / (intervals.length * best.days))
+      1 -
+      Math.min(
+        1,
+        intervals.reduce((a, iv) => a + Math.abs(iv - best.f.days), 0) / (intervals.length * best.f.days),
+      )
     const confidence = Math.min(
       0.99,
       0.4 + 0.1 * Math.min(5, sorted.length) + 0.3 * intervalConsistency - 0.2 * maxDeviation,
@@ -123,11 +131,11 @@ export function detectRecurring(txns: TxnLike[]): RecurringCandidate[] {
     results.push({
       key,
       description: last.description,
-      frequency: best.name,
+      frequency: best.f.name,
       averageAmountMinor: -avg,
       lastAmountMinor: -amounts[amounts.length - 1],
       lastDate: last.date,
-      nextExpectedDate: isoAddDays(last.date, best.days),
+      nextExpectedDate: isoAddDays(last.date, best.f.days),
       occurrences: sorted.length,
       amountVariancePct: Math.round(maxDeviation * 100),
       confidence: Math.max(0, Math.min(1, confidence)),

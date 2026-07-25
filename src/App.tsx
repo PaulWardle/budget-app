@@ -6,20 +6,40 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import AppLayout from './components/layout/AppLayout'
 import LoginPage from './pages/auth/LoginPage'
 
-const HomePage = lazy(() => import('./pages/home/HomePage'))
-const TransactionsPage = lazy(() => import('./pages/transactions/TransactionsPage'))
-const BudgetPage = lazy(() => import('./pages/budget/BudgetPage'))
-const CashflowPage = lazy(() => import('./pages/cashflow/CashflowPage'))
-const DebtsPage = lazy(() => import('./pages/debts/DebtsPage'))
-const DebtDetailPage = lazy(() => import('./pages/debts/DebtDetailPage'))
-const WealthPage = lazy(() => import('./pages/wealth/WealthPage'))
-const BillsPage = lazy(() => import('./pages/bills/BillsPage'))
-const InsightsPage = lazy(() => import('./pages/insights/InsightsPage'))
-const ChatPage = lazy(() => import('./pages/chat/ChatPage'))
-const ImportsPage = lazy(() => import('./pages/imports/ImportsPage'))
-const ImportReviewPage = lazy(() => import('./pages/imports/ImportReviewPage'))
-const AccountsPage = lazy(() => import('./pages/accounts/AccountsPage'))
-const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'))
+/**
+ * Pages are code-split, so a tab left open across a deploy still points at the
+ * previous build's chunk filenames — those 404 and the page never renders.
+ * Reload once to pick up the new index, guarded so a genuinely broken chunk
+ * can't put the app in a reload loop.
+ */
+function lazyPage<T extends { default: React.ComponentType<unknown> }>(load: () => Promise<T>) {
+  return lazy(() =>
+    load().catch((err: unknown) => {
+      const stale = sessionStorage.getItem('chunk-reload')
+      if (!stale) {
+        sessionStorage.setItem('chunk-reload', String(Date.now()))
+        window.location.reload()
+        return new Promise<T>(() => {}) // never resolves; the reload takes over
+      }
+      throw err
+    }),
+  )
+}
+
+const HomePage = lazyPage(() => import('./pages/home/HomePage'))
+const TransactionsPage = lazyPage(() => import('./pages/transactions/TransactionsPage'))
+const BudgetPage = lazyPage(() => import('./pages/budget/BudgetPage'))
+const CashflowPage = lazyPage(() => import('./pages/cashflow/CashflowPage'))
+const DebtsPage = lazyPage(() => import('./pages/debts/DebtsPage'))
+const DebtDetailPage = lazyPage(() => import('./pages/debts/DebtDetailPage'))
+const WealthPage = lazyPage(() => import('./pages/wealth/WealthPage'))
+const BillsPage = lazyPage(() => import('./pages/bills/BillsPage'))
+const InsightsPage = lazyPage(() => import('./pages/insights/InsightsPage'))
+const ChatPage = lazyPage(() => import('./pages/chat/ChatPage'))
+const ImportsPage = lazyPage(() => import('./pages/imports/ImportsPage'))
+const ImportReviewPage = lazyPage(() => import('./pages/imports/ImportReviewPage'))
+const AccountsPage = lazyPage(() => import('./pages/accounts/AccountsPage'))
+const SettingsPage = lazyPage(() => import('./pages/settings/SettingsPage'))
 
 function Loading() {
   return (

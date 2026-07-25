@@ -52,6 +52,19 @@ describe('detectRecurring', () => {
     expect(c.frequency).toBe('monthly')
   })
 
+  it('prefers monthly when the dates drift but still land near the same date', () => {
+    // 29–31 day gaps read as monthly even though the mean brushes four-weekly's
+    // window — monthly is far and away the common case for a bill.
+    const txns = [
+      { date: '2026-01-05', amountMinor: -962, description: 'INSURANCE DD' },
+      { date: '2026-02-03', amountMinor: -962, description: 'INSURANCE DD' },
+      { date: '2026-03-04', amountMinor: -962, description: 'INSURANCE DD' },
+      { date: '2026-04-02', amountMinor: -962, description: 'INSURANCE DD' },
+    ]
+    const [c] = detectRecurring(txns)
+    expect(c.frequency).toBe('monthly')
+  })
+
   it('detects annual subscriptions', () => {
     const txns = [
       { date: '2024-06-10', amountMinor: -7999, description: 'AMAZON PRIME' },
