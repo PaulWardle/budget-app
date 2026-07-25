@@ -12,7 +12,9 @@ import {
   setInsightStatus,
 } from '@/lib/api'
 import { generateInsights } from '@/lib/insights'
-import { formatDate, money, todayIso } from '@/lib/format'
+import { everydayBaseline, forecastMonthEnd } from '@/lib/engine/forecast'
+import { expandRecurring } from '@/lib/engine/cashflow'
+import { daysInMonthOf, formatDate, money, todayIso } from '@/lib/format'
 import type { Insight } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, RefreshCw } from 'lucide-react'
@@ -105,13 +107,16 @@ export default function InsightsPage() {
     queryKey: ['transactions', 'history', historyFrom],
     queryFn: () => fetchTransactions({ from: historyFrom, limit: 3000 }),
   })
-  useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
+  const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   useQuery({ queryKey: ['liabilities'], queryFn: fetchLiabilities })
 
   const regen = useMutation({
     mutationFn: async () => {
       if (!historyTxns || !categories || !recurring) return 0
-      return generateInsights(userId, historyTxns, categories, recurring)
+      const cashMinor = (accounts ?? [])
+        .filter((a) => ['current', 'cash', 'wallet'].includes(a.account_type) && !a.archived_at)
+        .reduce((s, a) => s + a.balance_minor, 0)
+      return generateInsights(userId, historyTxns, categories, recurring, { cashMinor })
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['insights'] }),
   })
@@ -135,6 +140,76 @@ export default function InsightsPage() {
   }, [categories])
   const merchantLabel = (t: { merchant_name: string | null; description: string }) =>
     (t.merchant_name ?? t.description).trim()
+
+  // Live forward view. Insights below are "something happened"; this is "where
+  // the month is heading", recomputed on every render rather than stored.
+  const outlook = useMemo(() => {
+    if (!historyTxns || !accounts) return null
+    const today = todayIso()
+    const monthStart = `${today.slice(0, 7)}-01`
+    const map = (t: (typeof historyTxns)[number]) => ({
+      date: t.date,
+      amountMinor: t.amount_minor,
+      categoryId: t.category_id,
+      isTransfer: t.is_transfer,
+      excludeFromBudget: t.exclude_from_budget,
+      isReimbursable: t.is_reimbursable,
+      recurringPaymentId: t.recurring_payment_id,
+    })
+    const baseline = everydayBaseline(historyTxns.map(map), today)
+    const cash = accounts
+      .filter((a) => ['current', 'cash', 'wallet'].includes(a.account_type) && !a.archived_at)
+      .reduce((s, a) => s + a.balance_minor, 0)
+    const dim = daysInMonthOf(monthStart)
+    const monthEnd = `${monthStart.slice(0, 8)}${String(dim).padStart(2, '0')}`
+    const scheduled = (recurring ?? [])
+      .filter((r) => r.status === 'active')
+      .flatMap((r) =>
+        expandRecurring(
+          {
+            name: r.name,
+            amountMinor: r.amount_minor,
+            frequency: r.frequency,
+            nextDueDate: r.next_due_date,
+            intervalDays: r.interval_days,
+          },
+          today,
+          monthEnd,
+        ),
+      )
+      .filter((i) => i.date > today)
+    const forecast = forecastMonthEnd({
+      today,
+      currentBalanceMinor: cash,
+      monthTxns: historyTxns.filter((t) => t.date >= monthStart).map(map),
+      baseline,
+      remainingScheduled: scheduled,
+    })
+    // Everyday spend this month per category, against its typical full month.
+    const spentByCat = new Map<string | null, number>()
+    for (const t of historyTxns) {
+      if (t.date < monthStart) continue
+      if (t.is_transfer || t.exclude_from_budget || t.is_reimbursable) continue
+      if (t.recurring_payment_id || t.amount_minor >= 0) continue
+      const key = parentOf.get(t.category_id ?? '')?.id ?? t.category_id
+      spentByCat.set(key, (spentByCat.get(key) ?? 0) + -t.amount_minor)
+    }
+    const typicalByCat = new Map<string | null, number>()
+    for (const c of baseline.byCategory) {
+      const key = parentOf.get(c.categoryId ?? '')?.id ?? c.categoryId
+      typicalByCat.set(key, (typicalByCat.get(key) ?? 0) + c.perMonthMinor)
+    }
+    const categoryPace = [...typicalByCat.entries()]
+      .map(([categoryId, typicalMinor]) => ({
+        categoryId,
+        typicalMinor,
+        spentMinor: spentByCat.get(categoryId) ?? 0,
+      }))
+      .filter((c) => c.typicalMinor > 1000 || c.spentMinor > 1000)
+      .sort((a, b) => b.typicalMinor - a.typicalMinor)
+      .slice(0, 6)
+    return { baseline, forecast, categoryPace, monthEnd }
+  }, [historyTxns, accounts, recurring, parentOf])
 
   const analytics = useMemo(() => {
     const rows = (txns ?? []).filter(
@@ -263,6 +338,76 @@ export default function InsightsPage() {
           </Button>
         }
       />
+
+      {/* Live forward view — recomputed each render, not a stored insight */}
+      {outlook && outlook.forecast.basis !== 'none' && (
+        <Card>
+          <CardTitle>Where this month is heading</CardTitle>
+          <p className="text-sm">
+            {outlook.forecast.basis === 'baseline' ? (
+              <>
+                Across your last {outlook.baseline.monthsUsed} complete month
+                {outlook.baseline.monthsUsed === 1 ? '' : 's'} you spend{' '}
+                <strong>{money(outlook.baseline.perMonthMinor)}</strong> a month on everyday things
+                (ranging {money(outlook.baseline.lowMinor)}–{money(outlook.baseline.highMinor)}).
+              </>
+            ) : (
+              <>Working from this month's own pace — there's no complete month of history yet.</>
+            )}{' '}
+            With {outlook.forecast.daysRemaining} day
+            {outlook.forecast.daysRemaining === 1 ? '' : 's'} left, you're on course to spend{' '}
+            <strong>{money(outlook.forecast.forecastSpendMinor)}</strong> in total this month against{' '}
+            {money(outlook.forecast.forecastIncomeMinor)} coming in.
+          </p>
+          <p
+            className={`mt-2 text-sm font-medium ${
+              outlook.forecast.forecastEndBalanceMinor < 0 ? 'text-bad' : 'text-good'
+            }`}
+          >
+            {outlook.forecast.forecastEndBalanceMinor < 0
+              ? `On this pace you're about ${money(Math.abs(outlook.forecast.forecastEndBalanceMinor))} short by ${formatDate(outlook.monthEnd)} — even before anything unexpected.`
+              : `On this pace you end ${formatDate(outlook.monthEnd)} with about ${money(outlook.forecast.forecastEndBalanceMinor)}.`}
+          </p>
+          {outlook.categoryPace.length > 0 && (
+            <div className="mt-3 space-y-1.5">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">
+                Everyday spend so far vs a typical month
+              </p>
+              {outlook.categoryPace.map((c) => {
+                const pct =
+                  c.typicalMinor > 0 ? Math.round((c.spentMinor / c.typicalMinor) * 100) : null
+                const expectedByNow =
+                  (c.typicalMinor * outlook.forecast.dayOfMonth) / outlook.forecast.daysInMonth
+                const hot = c.spentMinor > expectedByNow * 1.25
+                return (
+                  <button
+                    key={c.categoryId ?? 'none'}
+                    type="button"
+                    onClick={() => drill({ cat: c.categoryId ?? 'none', merchant: null })}
+                    className="flex w-full items-center justify-between rounded-md px-1 py-0.5 text-xs transition-colors hover:bg-app"
+                  >
+                    <span>{categoryLabel(categories ?? [], c.categoryId)}</span>
+                    <span className="tnum text-ink-muted">
+                      {money(c.spentMinor)} of {money(c.typicalMinor)} typical
+                      {pct !== null && (
+                        <span className={hot ? 'ml-1.5 text-warn' : 'ml-1.5 text-ink-faint'}>
+                          {pct}%
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                )
+              })}
+              <p className="pt-1 text-[11px] text-ink-faint">
+                Day {outlook.forecast.dayOfMonth} of {outlook.forecast.daysInMonth}, so roughly{' '}
+                {Math.round((outlook.forecast.dayOfMonth / outlook.forecast.daysInMonth) * 100)}% of
+                the month has passed. Bills are excluded — these are the categories you can actually
+                move.
+              </p>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Insight feed */}
       {(insights ?? []).length === 0 ? (

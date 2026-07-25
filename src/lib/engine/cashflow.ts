@@ -4,7 +4,13 @@
 
 import type { Minor } from './money'
 
-export type CommitmentSource = 'confirmed' | 'recurring' | 'user_expected' | 'ai_estimated'
+export type CommitmentSource =
+  | 'confirmed'
+  | 'recurring'
+  | 'user_expected'
+  | 'ai_estimated'
+  /** Measured everyday spending projected forward — not a diarised commitment. */
+  | 'typical'
 
 export interface ProjectedItem {
   date: string // ISO

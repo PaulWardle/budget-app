@@ -9,8 +9,10 @@ import {
   type ProjectedItem,
 } from '@/lib/engine/cashflow'
 import { categoryActuals } from '@/lib/engine/budget'
-import { formatDateShort, money, monthStartIso, todayIso } from '@/lib/format'
+import { everydayBaseline, forecastMonthEnd, typicalSpendItems } from '@/lib/engine/forecast'
+import { daysInMonthOf, formatDateShort, money, monthStartIso, todayIso } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
 import {
   Line,
   LineChart,
@@ -24,14 +26,21 @@ import {
 export default function CashflowPage() {
   const today = todayIso()
   const month = monthStartIso()
+  const [includeTypical, setIncludeTypical] = useState(true)
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: recurring } = useQuery({ queryKey: ['recurring'], queryFn: fetchRecurring })
   const { data: txns } = useQuery({
     queryKey: ['transactions', 'month', month],
     queryFn: () => fetchTransactions({ from: month, limit: 1000 }),
   })
+  // Four months back so the baseline has three complete months to measure.
+  const historyFrom = isoMonthsAgo(4)
+  const { data: history } = useQuery({
+    queryKey: ['transactions', 'history', historyFrom],
+    queryFn: () => fetchTransactions({ from: historyFrom, limit: 3000 }),
+  })
 
-  if (!accounts || !recurring || !txns) return <Spinner />
+  if (!accounts || !recurring || !txns || !history) return <Spinner />
 
   const opening = accounts
     .filter((a) => a.include_in_cashflow && ['current', 'cash', 'wallet'].includes(a.account_type))
@@ -55,8 +64,42 @@ export default function CashflowPage() {
         end,
       ),
     )
-  const projection = projectDailyBalances(opening, items, today, horizon)
+  // What everyday spending has actually been, projected forward. Without this
+  // the line only falls on bill dates and reads far healthier than reality.
+  const baseline = everydayBaseline(
+    history.map((t) => ({
+      date: t.date,
+      amountMinor: t.amount_minor,
+      categoryId: t.category_id,
+      isTransfer: t.is_transfer,
+      excludeFromBudget: t.exclude_from_budget,
+      isReimbursable: t.is_reimbursable,
+      recurringPaymentId: t.recurring_payment_id,
+    })),
+    today,
+  )
+  const typical = includeTypical ? typicalSpendItems(baseline.perDayMinor, today, horizon) : []
+  const allItems = [...items, ...typical]
+
+  const projection = projectDailyBalances(opening, allItems, today, horizon)
   const sts = safeToSpend(opening, projection)
+
+  const monthEnd = `${month.slice(0, 8)}${String(daysInMonthOf(month)).padStart(2, '0')}`
+  const forecast = forecastMonthEnd({
+    today,
+    currentBalanceMinor: opening,
+    monthTxns: txns.map((t) => ({
+      date: t.date,
+      amountMinor: t.amount_minor,
+      categoryId: t.category_id,
+      isTransfer: t.is_transfer,
+      excludeFromBudget: t.exclude_from_budget,
+      isReimbursable: t.is_reimbursable,
+      recurringPaymentId: t.recurring_payment_id,
+    })),
+    baseline,
+    remainingScheduled: items.filter((i) => i.date > today && i.date <= monthEnd),
+  })
 
   // Month to date actuals
   const engineTxns = txns.map((t) => ({
@@ -89,7 +132,81 @@ export default function CashflowPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader title="Cashflow" sub="Confirmed transactions vs known recurring commitments over the next 30 days" />
+      <PageHeader
+        title="Cashflow"
+        sub="Where the month lands, based on your bills and how you actually spend"
+      />
+
+      <Card>
+        <CardTitle>Where this month is heading</CardTitle>
+        {forecast.basis === 'none' ? (
+          <p className="text-sm text-ink-muted">
+            Not enough history yet to project everyday spending. Import a couple of months of
+            statements and this becomes a real forecast.
+          </p>
+        ) : (
+          <>
+            <p className="text-sm">
+              {forecast.basis === 'baseline' ? (
+                <>
+                  On your last {baseline.monthsUsed} month{baseline.monthsUsed === 1 ? '' : 's'} you
+                  typically spend <strong>{money(baseline.perMonthMinor)}</strong> a month on
+                  everyday things — roughly {money(baseline.perDayMinor)} a day.
+                </>
+              ) : (
+                <>
+                  Working from this month's own pace of {money(Math.round(forecast.everydaySpentMinor / Math.max(1, forecast.dayOfMonth)))} a
+                  day, since there's no complete month of history yet.
+                </>
+              )}{' '}
+              With {forecast.daysRemaining} day{forecast.daysRemaining === 1 ? '' : 's'} left and{' '}
+              {money(forecast.billsRemainingMinor)} of bills still due, you're tracking to spend{' '}
+              <strong>{money(forecast.forecastSpendMinor)}</strong> this month.
+            </p>
+            <p
+              className={`mt-2 text-sm font-medium ${
+                forecast.forecastEndBalanceMinor < 0 ? 'text-bad' : 'text-ink'
+              }`}
+            >
+              {forecast.forecastEndBalanceMinor < 0 ? (
+                <>
+                  That leaves you about {money(forecast.forecastEndBalanceMinor)} at month end —{' '}
+                  {money(Math.abs(forecast.forecastEndBalanceMinor))} short.
+                </>
+              ) : (
+                <>That leaves about {money(forecast.forecastEndBalanceMinor)} at month end.</>
+              )}
+            </p>
+            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <Stat label="Everyday so far" value={money(forecast.everydaySpentMinor)} />
+              <Stat label="Everyday still expected" value={money(forecast.everydayRemainingMinor)} />
+              <Stat label="Bills paid" value={money(forecast.billsPaidMinor)} />
+              <Stat label="Bills still due" value={money(forecast.billsRemainingMinor)} />
+            </div>
+            {forecast.basis === 'baseline' && (
+              <p className="mt-3 text-[11px] text-ink-faint">
+                Everyday spend excludes your bills, transfers and anything marked reimbursable.
+                Measured across {baseline.months.map((m) => money(m.totalMinor)).join(', ')} — the
+                middle month is used, so one unusual month doesn't skew it.
+                {forecast.paceRatio >= 1.25 && (
+                  <span className="text-warn">
+                    {' '}
+                    You're running about {Math.round((forecast.paceRatio - 1) * 100)}% above that
+                    pace so far this month.
+                  </span>
+                )}
+                {forecast.paceRatio <= 0.75 && (
+                  <span className="text-good">
+                    {' '}
+                    You're running about {Math.round((1 - forecast.paceRatio) * 100)}% below that
+                    pace so far this month.
+                  </span>
+                )}
+              </p>
+            )}
+          </>
+        )}
+      </Card>
 
       <Card>
         <CardTitle>This month so far</CardTitle>
@@ -103,7 +220,18 @@ export default function CashflowPage() {
       </Card>
 
       <Card>
-        <CardTitle>Projected daily balance — next 30 days</CardTitle>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="mb-0">Projected daily balance — next 30 days</CardTitle>
+          <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-ink-muted">
+            <input
+              type="checkbox"
+              checked={includeTypical}
+              onChange={(e) => setIncludeTypical(e.target.checked)}
+              className="accent-[var(--app-accent)]"
+            />
+            Include typical everyday spending
+          </label>
+        </div>
         <p className="mb-2 text-xs text-ink-muted">
           {sts.negativeDays.length > 0 ? (
             <span className="text-bad">
@@ -113,7 +241,12 @@ export default function CashflowPage() {
           ) : (
             <span className="text-good">Projected balance stays positive for the next 30 days.</span>
           )}{' '}
-          Lowest point: {money(sts.minProjectedBalanceMinor)}.
+          Lowest point: {money(sts.minProjectedBalanceMinor)}.{' '}
+          {includeTypical && baseline.perDayMinor > 0 ? (
+            <>Includes {money(baseline.perDayMinor)}/day of everyday spending on top of your bills.</>
+          ) : (
+            <>Bills only — everyday spending is not counted.</>
+          )}
         </p>
         <div className="h-56">
           <ResponsiveContainer>
@@ -166,12 +299,13 @@ export default function CashflowPage() {
         <CardTitle>30-day calendar</CardTitle>
         <div className="space-y-1">
           {projection
-            .filter((d) => d.items.length > 0)
+            .map((d) => ({ ...d, dated: d.items.filter((i) => i.source !== 'typical') }))
+            .filter((d) => d.dated.length > 0)
             .map((d) => (
               <div key={d.date} className="flex items-start justify-between gap-3 border-b border-border py-2 last:border-0">
                 <div>
                   <p className="tnum text-xs font-semibold text-ink-muted">{formatDateShort(d.date)}</p>
-                  {d.items.map((item, i) => (
+                  {d.dated.map((item, i) => (
                     <p key={i} className="text-sm">
                       {item.name}
                       {item.source === 'ai_estimated' && (
@@ -203,6 +337,11 @@ function isoPlus(iso: string, days: number): string {
   const d = new Date(`${iso}T00:00:00Z`)
   d.setUTCDate(d.getUTCDate() + days)
   return d.toISOString().slice(0, 10)
+}
+
+function isoMonthsAgo(months: number): string {
+  const d = new Date()
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth() - months, 1)).toISOString().slice(0, 10)
 }
 
 function findHeavyWeeks(items: ProjectedItem[]): { start: string; totalMinor: number }[] {

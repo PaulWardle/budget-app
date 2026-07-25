@@ -4,6 +4,8 @@
 // moralising about ordinary spending.
 
 import { supabase } from '@/lib/supabase'
+import { expandRecurring } from '@/lib/engine/cashflow'
+import { daysInMonth, everydayBaseline, forecastMonthEnd } from '@/lib/engine/forecast'
 import { formatMinor } from '@/lib/engine/money'
 import type { Category, RecurringPayment, Transaction } from '@/types/domain'
 
@@ -34,6 +36,7 @@ export async function generateInsights(
   txns: Transaction[],
   categories: Category[],
   recurring: RecurringPayment[],
+  opts: { cashMinor?: number } = {},
 ): Promise<number> {
   const now = new Date()
   const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
@@ -236,6 +239,124 @@ export async function generateInsights(
       period_start: periodStart,
       period_end: periodEnd,
     })
+  }
+
+  // --- Where the month is heading -----------------------------------------
+  // Forward-looking, and the reason it exists: a month can look fine on bills
+  // alone right up until ordinary spending finishes the account off.
+  const today = now.toISOString().slice(0, 10)
+  const forecastTxns = txns.map((t) => ({
+    date: t.date,
+    amountMinor: t.amount_minor,
+    categoryId: t.category_id,
+    isTransfer: t.is_transfer,
+    excludeFromBudget: t.exclude_from_budget,
+    isReimbursable: t.is_reimbursable,
+    recurringPaymentId: t.recurring_payment_id,
+  }))
+  const baseline = everydayBaseline(forecastTxns, today)
+  if (baseline.monthsUsed >= 2) {
+    const dim = daysInMonth(thisMonth)
+    const monthEnd = `${thisMonth}-${String(dim).padStart(2, '0')}`
+    const remainingScheduled = recurring
+      .filter((r) => r.status === 'active')
+      .flatMap((r) =>
+        expandRecurring(
+          {
+            name: r.name,
+            amountMinor: r.amount_minor,
+            frequency: r.frequency,
+            nextDueDate: r.next_due_date,
+            intervalDays: r.interval_days,
+          },
+          today,
+          monthEnd,
+        ),
+      )
+      .filter((i) => i.date > today)
+    const forecast = forecastMonthEnd({
+      today,
+      currentBalanceMinor: opts.cashMinor ?? 0,
+      monthTxns: forecastTxns.filter((t) => monthKey(t.date) === thisMonth),
+      baseline,
+      remainingScheduled,
+    })
+
+    if (opts.cashMinor !== undefined && forecast.forecastEndBalanceMinor < 0) {
+      drafts.push({
+        insight_type: 'projected_shortfall',
+        headline: `On your usual spending you're about ${fmt(forecast.forecastEndBalanceMinor)} short by month end`,
+        body: `You have ${fmt(opts.cashMinor)} available with ${forecast.daysRemaining} days left. Your typical everyday spending of ${fmt(baseline.perMonthMinor)}/month works out at about ${fmt(baseline.perDayMinor)}/day (${fmt(forecast.everydayRemainingMinor)} for the days remaining), and ${fmt(forecast.billsRemainingMinor)} of bills are still due. That lands at roughly ${fmt(forecast.forecastEndBalanceMinor)} below zero before anything unexpected.`,
+        figures: {
+          cash: opts.cashMinor,
+          everyday_remaining: forecast.everydayRemainingMinor,
+          bills_remaining: forecast.billsRemainingMinor,
+          projected_end: forecast.forecastEndBalanceMinor,
+        },
+        comparison_period: `${baseline.monthsUsed}-month spending baseline`,
+        confidence: baseline.confidence,
+        suggested_action: 'Check the Cashflow projection for the day it turns, and what could move.',
+        impact_minor: Math.abs(forecast.forecastEndBalanceMinor),
+        severity: 'warning',
+        dedupe_key: `projected_shortfall:${thisMonth}:${Math.round(forecast.forecastEndBalanceMinor / 5000)}`,
+        period_start: periodStart,
+        period_end: periodEnd,
+      })
+    }
+
+    if (forecast.paceRatio >= 1.3 && forecast.dayOfMonth >= 7) {
+      const overMinor = Math.round(forecast.forecastSpendMinor - forecast.billsPaidMinor - forecast.billsRemainingMinor - baseline.perMonthMinor)
+      drafts.push({
+        insight_type: 'spending_pace',
+        headline: `Everyday spending is running ${Math.round((forecast.paceRatio - 1) * 100)}% above your usual pace`,
+        body: `You're ${fmt(forecast.everydaySpentMinor)} into everyday spending on day ${forecast.dayOfMonth} of ${forecast.daysInMonth}. At your normal rate you'd be around ${fmt(Math.round((baseline.perMonthMinor * forecast.dayOfMonth) / forecast.daysInMonth))} by now. Carrying on at this rate the month lands about ${fmt(overMinor)} above a typical ${fmt(baseline.perMonthMinor)}.`,
+        figures: { pace_ratio: Number(forecast.paceRatio.toFixed(2)), spent: forecast.everydaySpentMinor, typical: baseline.perMonthMinor },
+        comparison_period: `${baseline.monthsUsed}-month spending baseline`,
+        confidence: baseline.confidence,
+        suggested_action: null,
+        impact_minor: overMinor > 0 ? overMinor : null,
+        severity: 'warning',
+        dedupe_key: `spending_pace:${thisMonth}:${Math.round(forecast.paceRatio * 10)}`,
+        period_start: periodStart,
+        period_end: periodEnd,
+      })
+    }
+
+    // Categories on course to finish the month well above their usual level.
+    for (const c of baseline.byCategory.slice(0, 12)) {
+      if (c.perMonthMinor < 2000) continue
+      const spent = forecastTxns
+        .filter(
+          (t) =>
+            monthKey(t.date) === thisMonth &&
+            t.categoryId === c.categoryId &&
+            t.amountMinor < 0 &&
+            !t.isTransfer &&
+            !t.excludeFromBudget &&
+            !t.isReimbursable &&
+            !t.recurringPaymentId,
+        )
+        .reduce((s, t) => s + -t.amountMinor, 0)
+      const projected = Math.round(
+        spent + (c.perMonthMinor / daysInMonth(thisMonth)) * forecast.daysRemaining,
+      )
+      if (spent > c.perMonthMinor && spent - c.perMonthMinor > 3000 && forecast.daysRemaining > 2) {
+        drafts.push({
+          insight_type: 'category_pace',
+          headline: `${catName(c.categoryId)} has already passed a typical month with ${forecast.daysRemaining} days to go`,
+          body: `${catName(c.categoryId)} is at ${fmt(spent)} against a typical ${fmt(c.perMonthMinor)} for a full month. On current behaviour it finishes around ${fmt(projected)}.`,
+          figures: { spent, typical: c.perMonthMinor, projected },
+          comparison_period: `${baseline.monthsUsed}-month median`,
+          confidence: baseline.confidence,
+          suggested_action: null,
+          impact_minor: spent - c.perMonthMinor,
+          severity: 'warning',
+          dedupe_key: `category_pace:${c.categoryId ?? 'none'}:${thisMonth}`,
+          period_start: periodStart,
+          period_end: periodEnd,
+        })
+      }
+    }
   }
 
   if (drafts.length === 0) return 0

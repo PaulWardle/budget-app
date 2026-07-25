@@ -17,6 +17,7 @@ import { expandRecurring, projectDailyBalances, safeToSpend, type ProjectedItem 
 import { computeNetWorth } from '@/lib/engine/networth'
 import { daysInMonthOf, formatDateShort, formatDateTime, money, monthStartIso, todayIso } from '@/lib/format'
 import { DrillDown, type DrillRow } from '@/components/shared/drilldown'
+import { everydayBaseline, forecastMonthEnd } from '@/lib/engine/forecast'
 import { LIQUID_ACCOUNT_TYPES } from '@/types/domain'
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -45,6 +46,12 @@ export default function HomePage() {
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
   const { data: recurring } = useQuery({ queryKey: ['recurring'], queryFn: fetchRecurring })
   const { data: insights } = useQuery({ queryKey: ['insights'], queryFn: () => fetchInsights() })
+  // Four months back so the spending baseline has three complete months.
+  const historyFrom = isoMonthsAgo(4)
+  const { data: history } = useQuery({
+    queryKey: ['transactions', 'history', historyFrom],
+    queryFn: () => fetchTransactions({ from: historyFrom, limit: 3000 }),
+  })
 
   if (!accounts || !liabilities || !txns || !categories || !recurring) {
     return (
@@ -184,6 +191,26 @@ export default function HomePage() {
 
   const projection = projectDailyBalances(cash, upcoming, today, 30)
   const sts = safeToSpend(cash, projection)
+
+  // Behaviour-based forecast: bills alone never explain where a month lands.
+  const toForecastTxn = (t: (typeof txns)[number]) => ({
+    date: t.date,
+    amountMinor: t.amount_minor,
+    categoryId: t.category_id,
+    isTransfer: t.is_transfer,
+    excludeFromBudget: t.exclude_from_budget,
+    isReimbursable: t.is_reimbursable,
+    recurringPaymentId: t.recurring_payment_id,
+  })
+  const baseline = everydayBaseline((history ?? []).map(toForecastTxn), today)
+  const monthEndIso = `${month.slice(0, 8)}${String(daysInMonth).padStart(2, '0')}`
+  const forecast = forecastMonthEnd({
+    today,
+    currentBalanceMinor: cash,
+    monthTxns: txns.map(toForecastTxn),
+    baseline,
+    remainingScheduled: upcoming.filter((u) => u.date > today && u.date <= monthEndIso),
+  })
 
   const billsPaid = txns.filter((t) => t.recurring_payment_id && t.amount_minor < 0)
   const dueThisMonth = upcoming.filter((u) => u.date <= `${month.slice(0, 8)}${String(daysInMonth).padStart(2, '0')}` && u.amountMinor < 0)
@@ -404,6 +431,28 @@ export default function HomePage() {
             />
           </div>
         )}
+        {forecast.basis !== 'none' && (
+          <div className="mt-3 rounded-lg bg-surface-2 px-3 py-2.5">
+            <p className="text-sm">
+              Tracking to spend <strong>{money(forecast.forecastSpendMinor)}</strong> this month
+              {forecast.basis === 'baseline'
+                ? ` — you typically spend ${money(baseline.perMonthMinor)} on everyday things plus your bills.`
+                : ' based on this month’s pace so far.'}
+            </p>
+            <p
+              className={`mt-1 text-sm font-medium ${
+                forecast.forecastEndBalanceMinor < 0 ? 'text-bad' : 'text-ink-muted'
+              }`}
+            >
+              {forecast.forecastEndBalanceMinor < 0
+                ? `That puts you about ${money(Math.abs(forecast.forecastEndBalanceMinor))} short by ${formatDateShort(monthEndIso)}.`
+                : `Leaves about ${money(forecast.forecastEndBalanceMinor)} at month end.`}{' '}
+              <Link to="/cashflow" className="text-accent hover:underline">
+                See the projection
+              </Link>
+            </p>
+          </div>
+        )}
         {!budget && (
           <p className="mt-3 text-xs text-ink-faint">
             No budget for this month yet.{' '}
@@ -554,6 +603,11 @@ export default function HomePage() {
       />
     </div>
   )
+}
+
+function isoMonthsAgo(months: number): string {
+  const d = new Date()
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth() - months, 1)).toISOString().slice(0, 10)
 }
 
 function isoPlus(iso: string, days: number): string {
