@@ -25,16 +25,24 @@ import {
   fetchAccounts,
   fetchCategories,
   fetchTransactions,
+  learnMerchant,
   setTransactionSplits,
   updateTransaction,
   type TxnFilters,
 } from '@/lib/api'
+import { dedupeHash } from '@/lib/engine/duplicates'
+import { normaliseDescription } from '@/lib/engine/recurring'
+import { supabase } from '@/lib/supabase'
 import { formatDate, money, todayIso } from '@/lib/format'
 import type { Transaction } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, SlidersHorizontal } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+
+function titleCaseKey(s: string): string {
+  return s.toLowerCase().split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+}
 
 export default function TransactionsPage() {
   const userId = useUserId()
@@ -42,7 +50,7 @@ export default function TransactionsPage() {
   const [params] = useSearchParams()
   const [search, setSearch] = useState('')
   const [showFilters, setShowFilters] = useState(false)
-  const [filters, setFilters] = useState<TxnFilters>({
+  const filtersFromParams = (): TxnFilters & { duplicatesOnly?: boolean } => ({
     accountId: params.get('account') ?? undefined,
     categoryId: params.get('category') ?? undefined,
     merchantId: params.get('merchant') ?? undefined,
@@ -50,16 +58,81 @@ export default function TransactionsPage() {
     to: params.get('to') ?? undefined,
     uncategorised: params.get('uncategorised') === '1' || undefined,
     importBatchId: params.get('batch') ?? undefined,
+    duplicatesOnly: params.get('duplicates') === '1' || undefined,
   })
+  const [filters, setFilters] = useState<TxnFilters & { duplicatesOnly?: boolean }>(filtersFromParams)
+  // Keep filters in sync when arriving via a link (e.g. from Data Quality)
+  useEffect(() => {
+    setFilters(filtersFromParams())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params])
   const [editing, setEditing] = useState<Transaction | null>(null)
   const [adding, setAdding] = useState(false)
 
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
-  const effective = useMemo(() => ({ ...filters, search: search || undefined }), [filters, search])
-  const { data: txns, isLoading } = useQuery({
+  const effective = useMemo(
+    () => ({
+      ...filters,
+      duplicatesOnly: undefined,
+      search: search || undefined,
+      limit: filters.duplicatesOnly || filters.uncategorised ? 3000 : undefined,
+    }),
+    [filters, search],
+  )
+  const { data: rawTxns, isLoading } = useQuery({
     queryKey: ['transactions', effective],
     queryFn: () => fetchTransactions(effective),
+  })
+  // Duplicates view: keep only transactions whose account+date+amount+
+  // normalised description occurs more than once in the ledger
+  const txns = useMemo(() => {
+    if (!rawTxns) return rawTxns
+    if (!filters.duplicatesOnly) return rawTxns
+    const counts = new Map<string, number>()
+    for (const t of rawTxns) {
+      const h = dedupeHash({ accountId: t.account_id, date: t.date, amountMinor: t.amount_minor, description: t.description })
+      counts.set(h, (counts.get(h) ?? 0) + 1)
+    }
+    return rawTxns.filter(
+      (t) =>
+        (counts.get(
+          dedupeHash({ accountId: t.account_id, date: t.date, amountMinor: t.amount_minor, description: t.description }),
+        ) ?? 0) > 1,
+    )
+  }, [rawTxns, filters.duplicatesOnly])
+
+  // Bulk categorisation groups: uncategorised transactions clustered by merchant
+  const bulkGroups = useMemo(() => {
+    if (!filters.uncategorised || !txns) return []
+    const groups = new Map<string, { name: string; ids: string[]; totalMinor: number }>()
+    for (const t of txns) {
+      const key = (t.merchant_name ?? normaliseDescription(t.description)) || 'Unknown'
+      const g = groups.get(key) ?? { name: t.merchant_name ?? titleCaseKey(key), ids: [], totalMinor: 0 }
+      g.ids.push(t.id)
+      if (t.amount_minor < 0) g.totalMinor += -t.amount_minor
+      groups.set(key, g)
+    }
+    return [...groups.values()].sort((a, b) => b.ids.length - a.ids.length).slice(0, 40)
+  }, [filters.uncategorised, txns])
+
+  const [bulkPicks, setBulkPicks] = useState<Record<string, string | null>>({})
+  const bulkApply = useMutation({
+    mutationFn: async (g: { name: string; ids: string[]; categoryId: string }) => {
+      const { error } = await supabase
+        .from('transactions')
+        .update({ category_id: g.categoryId, merchant_name: g.name })
+        .in('id', g.ids)
+      if (error) throw new Error(error.message)
+      // Learn it so every future import auto-categorises this merchant
+      await learnMerchant(userId, {
+        merchantName: g.name,
+        aliasPatterns: [g.name],
+        categoryId: g.categoryId,
+        source: 'manual',
+      }).catch(() => {})
+    },
+    onSuccess: () => invalidate(),
   })
 
   const invalidate = () => {
@@ -161,6 +234,52 @@ export default function TransactionsPage() {
             </label>
           </div>
         </Card>
+      )}
+
+      {filters.uncategorised && bulkGroups.length > 0 && (
+        <Card className="mb-3">
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+            Bulk categorise — biggest merchants first
+          </p>
+          <p className="mb-2 text-[11px] text-ink-faint">
+            Pick a category once per merchant; it applies to every matching transaction and is
+            remembered for all future imports.
+          </p>
+          <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
+            {bulkGroups.map((g) => (
+              <div key={g.name} className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{g.name}</p>
+                  <p className="text-[11px] text-ink-faint">
+                    {g.ids.length} transaction{g.ids.length === 1 ? '' : 's'} · {money(g.totalMinor)}
+                  </p>
+                </div>
+                <div className="w-48">
+                  <CategorySelect
+                    categories={categories}
+                    value={bulkPicks[g.name] ?? null}
+                    onChange={(v) => setBulkPicks({ ...bulkPicks, [g.name]: v })}
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!bulkPicks[g.name] || bulkApply.isPending}
+                  onClick={() => bulkApply.mutate({ name: g.name, ids: g.ids, categoryId: bulkPicks[g.name]! })}
+                >
+                  Apply
+                </Button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {filters.duplicatesOnly && (
+        <p className="mb-3 rounded-xl bg-warn/10 px-3 py-2 text-xs text-warn">
+          Showing only transactions that appear more than once (same account, date, amount and
+          description). Open one and delete it if it's a genuine duplicate.
+        </p>
       )}
 
       {isLoading && <Spinner />}

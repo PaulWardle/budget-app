@@ -13,7 +13,7 @@ import { processUpload } from '@/lib/importFlow'
 import { dedupeHash } from '@/lib/engine/duplicates'
 import { formatDateTime, relativeDays } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Camera, FileUp, Upload } from 'lucide-react'
+import { Camera, FileUp, Loader2, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -39,7 +39,6 @@ export default function ImportsPage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const cameraRef = useRef<HTMLInputElement>(null)
   const [accountId, setAccountId] = useState<string | null>(null)
-  const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   // The button is busy only while the file itself uploads (a second or two).
@@ -75,11 +74,9 @@ export default function ImportsPage() {
     mutationFn: async (files: FileList) => {
       setError(null)
       for (const file of files) {
-        setStatus(`Uploading ${file.name}…`)
         await startUpload(file)
       }
     },
-    onSettled: () => setStatus(null),
   })
 
   const undo = useMutation({
@@ -141,8 +138,12 @@ export default function ImportsPage() {
           />
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => fileRef.current?.click()} disabled={upload.isPending}>
-              <Upload className="h-4 w-4" />
-              {upload.isPending ? (status ?? 'Uploading…') : 'Choose files or photos'}
+              {upload.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Upload className="h-4 w-4" />
+              )}
+              Choose files or photos
             </Button>
             <Button variant="outline" onClick={() => cameraRef.current?.click()} disabled={upload.isPending}>
               <Camera className="h-4 w-4" /> Take photo
@@ -168,7 +169,11 @@ export default function ImportsPage() {
             link={uncategorised > 0 ? '/transactions?uncategorised=1' : undefined}
           />
           <QualityRow ok={lowConfidence === 0} label={lowConfidence === 0 ? 'No imports awaiting review' : `${lowConfidence} low-confidence imported transactions to check`} />
-          <QualityRow ok={dupes === 0} label={dupes === 0 ? 'No possible duplicates detected' : `${dupes} possible duplicate transaction pairs`} />
+          <QualityRow
+            ok={dupes === 0}
+            label={dupes === 0 ? 'No possible duplicates detected' : `${dupes} possible duplicate transaction pairs`}
+            link={dupes > 0 ? '/transactions?duplicates=1' : undefined}
+          />
           <QualityRow ok={missingLoanInfo.length === 0} label={missingLoanInfo.length === 0 ? 'All debts have full loan details' : `${missingLoanInfo.length} debt(s) missing APR/term/original amount: ${missingLoanInfo.map((l) => l.name).join(', ')}`} link={missingLoanInfo.length > 0 ? '/debts' : undefined} />
           <QualityRow ok={staleDebts.length === 0} label={staleDebts.length === 0 ? 'Debt balances are recent' : `${staleDebts.length} debt(s) without a balance update in 45+ days`} link={staleDebts.length > 0 ? '/debts' : undefined} />
           <QualityRow ok={unconfirmedRecurring === 0} label={unconfirmedRecurring === 0 ? 'No recurring payments awaiting confirmation' : `${unconfirmedRecurring} recurring payment(s) need confirmation`} link={unconfirmedRecurring > 0 ? '/bills' : undefined} />
@@ -231,10 +236,11 @@ function QualityRow({ ok, label, link }: { ok: boolean; label: string; link?: st
     <span className="flex items-start gap-2">
       <span className={`mt-1.5 inline-block h-2 w-2 shrink-0 rounded-full ${ok ? 'bg-good' : 'bg-warn'}`} />
       <span className={ok ? 'text-ink-muted' : ''}>{label}</span>
+      {link && <span className="ml-auto shrink-0 text-xs font-semibold text-accent">Fix ›</span>}
     </span>
   )
   return link ? (
-    <Link to={link} className="block hover:text-accent">
+    <Link to={link} className="block rounded-lg px-1 py-0.5 -mx-1 hover:bg-surface-2">
       {inner}
     </Link>
   ) : (
