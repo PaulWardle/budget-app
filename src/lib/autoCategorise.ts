@@ -121,10 +121,25 @@ export interface AutoSuggestion {
   path: [string] | [string, string]
 }
 
+// Financial arms of retailers: "TESCO BANK" is a loan/credit payment, not
+// groceries. These never auto-categorise — the user (or a learned rule) decides.
+const NEVER_MATCH = [
+  'TESCO BANK',
+  'SAINSBURYS BANK',
+  "SAINSBURY'S BANK",
+  'M&S BANK',
+  'MARKS & SPENCER FINANCIAL',
+  'ASDA MONEY',
+  'JOHN LEWIS FINANCE',
+  'ARGOS CARD',
+  'NEXT PAY',
+]
+
 /** Suggest a merchant + category for an unmistakable bank description.
  * Returns null when in any doubt — never guesses. */
 export function suggestFromDescription(description: string): AutoSuggestion | null {
   const hay = ` ${description.toUpperCase()} `
+  if (NEVER_MATCH.some((m) => hay.includes(m))) return null
   for (const rule of RULES) {
     if (rule.match.some((m) => hay.includes(m))) {
       return { merchant: rule.merchant, path: rule.path }

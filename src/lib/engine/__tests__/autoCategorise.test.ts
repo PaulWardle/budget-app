@@ -23,6 +23,12 @@ describe('suggestFromDescription', () => {
     expect(suggestFromDescription('BANK TRANSFER REF 8871')).toBeNull()
     expect(suggestFromDescription('')).toBeNull()
   })
+
+  it('never claims retailer bank arms for the retailer category', () => {
+    expect(suggestFromDescription('TESCO BANK PERSONAL LOAN')).toBeNull()
+    expect(suggestFromDescription("SAINSBURY'S BANK")).toBeNull()
+    expect(suggestFromDescription('M&S BANK CARD PAYMENT')).toBeNull()
+  })
 })
 
 describe('resolveCategoryId', () => {

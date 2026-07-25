@@ -283,7 +283,7 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
   {
     name: 'create_merchant_rule',
     description:
-      'Learn a merchant categorisation, e.g. "Acme Gym is my monthly gym membership" → merchant Acme Gym, category Health, subcategory Fitness, alias patterns like ACME GYM. Applies to future imports and optionally past transactions.',
+      'Learn a merchant categorisation, e.g. "Acme Gym is my monthly gym membership" → merchant Acme Gym, category Health, subcategory Fitness, alias patterns like ACME GYM. Applies to future imports and optionally past transactions. Also THE tool for fixing miscategorisations in bulk.',
     input_schema: {
       type: 'object',
       properties: {
@@ -639,14 +639,15 @@ async function executeAction(
           .single()
         ruleId = ruleId ?? (rule as { id: string } | null)?.id
       }
-      // Apply to past
+      // Apply to past — matches either the raw description or the stored
+      // merchant name, so bulk fixes work on already-categorised rows too.
       let updated = 0
       if (i.apply_to_past) {
         for (const pattern of i.alias_patterns) {
           const { data: rows } = await supabase
             .from('transactions')
             .update({ merchant_id: merchantId, merchant_name: i.merchant_name, ...(categoryId ? { category_id: categoryId } : {}) })
-            .ilike('description', `%${pattern}%`)
+            .or(`description.ilike.%${pattern}%,merchant_name.ilike.%${pattern}%`)
             .select('id')
           updated += rows?.length ?? 0
         }
@@ -820,6 +821,7 @@ Core rules:
 - For inferred conclusions (you suspect something is recurring, you're unsure which account/debt is meant), ask for confirmation first instead of acting.
 - When the user states a debt balance, create or update a structured liability record — never leave it as conversation only. Balances you record this way are "user-stated"; calculated balances are estimates, and lender settlement figures may differ — say so when relevant.
 - When the user teaches you a merchant meaning, use create_merchant_rule AND create_financial_fact.
+- When the user reports a miscategorisation ("Tesco Bank was marked as groceries but it's my loan"), fix it yourself: create_merchant_rule with the right category and apply_to_past=true recategorises the history AND prevents it recurring. Confirm how many transactions were fixed. Never just explain how to do it manually.
 - When an amount is mentioned without currency, assume GBP.
 - Transfers between the user's own accounts are not spending.
 - Be concise and factual. Use British English and £. Never moralise about ordinary spending.
