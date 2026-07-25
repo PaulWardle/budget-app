@@ -136,8 +136,10 @@ async function streamExtract(
   const stream = anthropic.beta.messages.stream({
     model: MODEL,
     max_tokens: MAX_OUTPUT_TOKENS,
-    betas: ['server-side-fallback-2026-07-01'],
-    fallbacks: 'default',
+    // Transcribing a statement is mechanical: reasoning tokens add cost without
+    // improving accuracy, so thinking is off and effort is low.
+    thinking: { type: 'disabled' },
+    output_config: { effort: 'low' },
     tools: [tool],
     tool_choice: { type: 'tool', name: tool.name },
     messages: [{ role: 'user', content: [contentBlock, { type: 'text', text: prompt }] }],

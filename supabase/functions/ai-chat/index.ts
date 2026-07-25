@@ -983,7 +983,7 @@ Deno.serve(async (req) => {
     .single()
   if (umErr) return json({ error: umErr.message }, 400)
 
-  // Conversation history (last 20 messages)
+  // Conversation history (last 12 messages — enough for continuity, bounded cost)
   const { data: history } = await ctx.supabase
     .from('chat_messages')
     .select('role,content')
@@ -1022,15 +1022,15 @@ Deno.serve(async (req) => {
   let finalText = ''
 
   try {
-    // Manual tool loop, max 8 iterations. Server-side refusal fallback is
-    // enabled so a safety-classifier decline retries on the default fallback
-    // model instead of failing the request.
+    // Manual tool loop, max 8 iterations. Prompt caching keeps the repeated
+    // system + tools + context prefix cheap across iterations.
     for (let iteration = 0; iteration < 8; iteration++) {
       const response = await anthropic.beta.messages.create({
         model: MODEL,
         max_tokens: 4096,
-        betas: ['server-side-fallback-2026-07-01'],
-        fallbacks: 'default',
+        // Medium effort: enough reasoning to pick the right action and read
+        // ledger numbers correctly, without paying for deep deliberation.
+        output_config: { effort: 'medium' },
         system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
         tools: TOOLS.map((t, idx) =>
           idx === TOOLS.length - 1 ? { ...t, cache_control: { type: 'ephemeral' as const } } : t,
