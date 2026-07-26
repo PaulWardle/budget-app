@@ -19,8 +19,10 @@ import { daysInMonthOf, formatDateShort, formatDateTime, money, monthStartIso, t
 import { DrillDown, type DrillRow } from '@/components/shared/drilldown'
 import { everydayBaseline, forecastMonthEnd } from '@/lib/engine/forecast'
 import { LIQUID_ACCOUNT_TYPES } from '@/types/domain'
-import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { generateInsights } from '@/lib/insights'
+import { useUserId } from '@/context/AuthContext'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 type Drill = {
@@ -33,6 +35,7 @@ type Drill = {
 }
 
 export default function HomePage() {
+  const userId = useUserId()
   const month = monthStartIso()
   const today = todayIso()
   const [drill, setDrill] = useState<Drill | null>(null)
@@ -56,6 +59,28 @@ export default function HomePage() {
     queryKey: ['transactions', 'uncategorised-count'],
     queryFn: () => fetchTransactions({ uncategorised: true, limit: 1000 }),
   })
+
+  // Proactive insights: generate once a day on arrival rather than waiting
+  // for a manual refresh. Fire-and-forget — a failure here never blocks Home.
+  const qc = useQueryClient()
+  useEffect(() => {
+    if (!history || !categories || !recurring || !accounts) return
+    const key = 'insights-auto-run'
+    const today = todayIso()
+    if (localStorage.getItem(key) === today) return
+    localStorage.setItem(key, today)
+    const cashMinor = accounts
+      .filter((a) => ['current', 'cash', 'wallet'].includes(a.account_type) && !a.archived_at)
+      .reduce((s, a) => s + a.balance_minor, 0)
+    void generateInsights(userId, history, categories, recurring, {
+      cashMinor,
+      currentAccountIds: accounts.filter((a) => a.account_type === 'current').map((a) => a.id),
+    })
+      .then((n) => {
+        if (n > 0) void qc.invalidateQueries({ queryKey: ['insights'] })
+      })
+      .catch(() => {})
+  }, [history, categories, recurring, accounts, userId, qc])
 
   if (!accounts || !liabilities || !txns || !categories || !recurring) {
     return (

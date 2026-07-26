@@ -874,32 +874,75 @@ async function executeAction(
     }
     case 'find_transactions': {
       const i = input as z.infer<(typeof actionSchemas)['find_transactions']>
-      let q = supabase
-        .from('transactions')
-        .select('id,date,description,merchant_name,amount_minor,category_id,is_transfer')
-        .order('date', { ascending: false })
-        .limit(i.limit)
-      if (i.from) q = q.gte('date', i.from)
-      if (i.to) q = q.lte('date', i.to)
-      const term = i.search ?? i.merchant
-      if (term) q = q.or(`description.ilike.%${term}%,merchant_name.ilike.%${term}%`)
+      // Aggregates must cover EVERY matching row, not just the page shown —
+      // a total computed over a truncated page is a confidently wrong answer.
+      // Page through the full match set (bounded), aggregate over all of it,
+      // and return only `limit` rows of detail.
+      let categoryIds: string[] | null = null
       if (i.category_name) {
-        const { data: cat } = await supabase
-          .from('categories').select('id').ilike('name', i.category_name).limit(1).maybeSingle()
-        if (cat) q = q.eq('category_id', (cat as { id: string }).id)
+        const { data: cats } = await supabase.from('categories').select('id,name,parent_id')
+        const all = (cats ?? []) as { id: string; name: string; parent_id: string | null }[]
+        const hit = all.find((c) => c.name.toLowerCase() === i.category_name!.toLowerCase())
+          ?? all.find((c) => c.name.toLowerCase().includes(i.category_name!.toLowerCase()))
+        if (hit) {
+          // A parent category includes all its subcategories.
+          categoryIds = [hit.id, ...all.filter((c) => c.parent_id === hit.id).map((c) => c.id)]
+        }
       }
-      const { data, error } = await q
-      if (error) throw new Error(error.message)
-      const rows = (data ?? []) as { amount_minor: number; is_transfer: boolean }[]
+      type Row = {
+        id: string; date: string; description: string; merchant_name: string | null
+        amount_minor: number; category_id: string | null; is_transfer: boolean
+      }
+      const rows: Row[] = []
+      const PAGE = 1000
+      const MAX_ROWS = 8000
+      for (let fromIdx = 0; fromIdx < MAX_ROWS; fromIdx += PAGE) {
+        let q = supabase
+          .from('transactions')
+          .select('id,date,description,merchant_name,amount_minor,category_id,is_transfer')
+          .order('date', { ascending: false })
+          .range(fromIdx, fromIdx + PAGE - 1)
+        if (i.from) q = q.gte('date', i.from)
+        if (i.to) q = q.lte('date', i.to)
+        const term = i.search ?? i.merchant
+        if (term) q = q.or(`description.ilike.%${term}%,merchant_name.ilike.%${term}%`)
+        if (categoryIds) q = q.in('category_id', categoryIds)
+        const { data, error } = await q
+        if (error) throw new Error(error.message)
+        const page = (data ?? []) as Row[]
+        rows.push(...page)
+        if (page.length < PAGE) break
+      }
+      const truncated = rows.length >= MAX_ROWS
       const spend = rows.filter((r) => r.amount_minor < 0 && !r.is_transfer)
+      const income = rows.filter((r) => r.amount_minor > 0 && !r.is_transfer)
       const totalSpent = spend.reduce((a, r) => a + -r.amount_minor, 0)
+      const byMonth = new Map<string, { spent: number; count: number }>()
+      for (const r of spend) {
+        const m = r.date.slice(0, 7)
+        const cur = byMonth.get(m) ?? { spent: 0, count: 0 }
+        cur.spent += -r.amount_minor
+        cur.count += 1
+        byMonth.set(m, cur)
+      }
       return {
         summary: `Found ${rows.length} transactions`,
         result: {
-          transactions: data,
-          count: rows.length,
+          transactions: rows.slice(0, i.limit),
+          detail_rows_shown: Math.min(rows.length, i.limit),
+          // Aggregates below cover ALL matching transactions, not just the
+          // detail rows above.
+          match_count: rows.length,
+          spend_count: spend.length,
           total_spent_minor: totalSpent,
+          total_income_minor: income.reduce((a, r) => a + r.amount_minor, 0),
           average_spend_minor: spend.length ? Math.round(totalSpent / spend.length) : 0,
+          monthly_spend: [...byMonth.entries()]
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([month, v]) => ({ month, spent_minor: v.spent, transactions: v.count })),
+          ...(truncated
+            ? { warning: 'Match set exceeded 8000 rows; aggregates cover only the newest 8000. Narrow the date range for exact totals.' }
+            : {}),
         },
         undoData: null,
         undoable: false,
@@ -911,14 +954,32 @@ async function executeAction(
 // --------------------------------------------------------------- context
 async function buildContext(ctx: AuthedContext): Promise<string> {
   const { supabase } = ctx
-  const [accounts, categories, liabilities, recurring, facts, goals] = await Promise.all([
+  const today = new Date().toISOString().slice(0, 10)
+  const month = today.slice(0, 7)
+  const monthStart = `${month}-01`
+  const daysInMonth = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate()
+  const monthEnd = `${month}-${String(daysInMonth).padStart(2, '0')}`
+  const historyFrom = (() => {
+    const d = new Date()
+    return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 4, 1)).toISOString().slice(0, 10)
+  })()
+
+  const [accounts, categories, liabilities, recurring, facts, goals, budget, nwSnap, history] = await Promise.all([
     supabase.from('accounts').select('id,name,provider,account_type,balance_minor,balance_updated_at').is('archived_at', null),
     supabase.from('categories').select('id,name,parent_id').eq('is_archived', false),
     supabase.from('liabilities').select('id,name,provider,liability_type,current_balance_minor,apr,monthly_payment_minor,balance_source,balance_effective_date').neq('status', 'archived'),
-    supabase.from('recurring_payments').select('id,name,kind,amount_minor,frequency,next_due_date,status'),
+    supabase.from('recurring_payments').select('id,name,kind,amount_minor,frequency,next_due_date,status,is_essential,liability_id'),
     supabase.from('financial_facts').select('fact_type,fact_key,value,confidence').eq('is_active', true).limit(50),
     supabase.from('savings_goals').select('id,name,target_minor,current_minor').neq('status', 'archived'),
+    supabase.from('budgets').select('*, budget_lines(*)').eq('month', monthStart).maybeSingle(),
+    supabase.from('net_worth_snapshots').select('date,assets_minor,liabilities_minor,net_worth_minor').order('date', { ascending: false }).limit(1).maybeSingle(),
+    supabase
+      .from('transactions')
+      .select('account_id,date,amount_minor,is_transfer,exclude_from_budget,is_reimbursable,recurring_payment_id,is_one_off,running_balance_minor,description')
+      .gte('date', historyFrom)
+      .limit(6000),
   ])
+
   const cats = (categories.data ?? []) as { id: string; name: string; parent_id: string | null }[]
   const catLines = cats
     .filter((c) => !c.parent_id)
@@ -927,11 +988,90 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
       return `- ${p.name} (${p.id})${children.length ? ': ' + children.map((c) => `${c.name} (${c.id})`).join(', ') : ''}`
     })
     .join('\n')
+
+  // ---- Engine-computed month position + forecast (deterministic, same
+  // definitions as the app: everyday spend excludes transfers, bills,
+  // reimbursable, excluded and one-off rows; baseline = median of the last
+  // three COMPLETE months).
+  type H = {
+    account_id: string; date: string; amount_minor: number; is_transfer: boolean
+    exclude_from_budget: boolean; is_reimbursable: boolean
+    recurring_payment_id: string | null; is_one_off: boolean
+    running_balance_minor: number | null; description: string
+  }
+  const hist = (history.data ?? []) as H[]
+  const isEveryday = (t: H) =>
+    t.amount_minor < 0 && !t.is_transfer && !t.exclude_from_budget && !t.is_reimbursable &&
+    !t.recurring_payment_id && !t.is_one_off
+  const everydayByMonth = new Map<string, number>()
+  for (const t of hist) {
+    if (!isEveryday(t) || t.date >= monthStart) continue
+    const m = t.date.slice(0, 7)
+    everydayByMonth.set(m, (everydayByMonth.get(m) ?? 0) + -t.amount_minor)
+  }
+  const monthTotals = [...everydayByMonth.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-3).map(([, v]) => v)
+  const sortedTotals = [...monthTotals].sort((a, b) => a - b)
+  const baselineMonthMinor = sortedTotals.length === 0 ? 0
+    : sortedTotals.length % 2 === 1 ? sortedTotals[Math.floor(sortedTotals.length / 2)]
+    : Math.round((sortedTotals[sortedTotals.length / 2 - 1] + sortedTotals[sortedTotals.length / 2]) / 2)
+  const baselinePerDay = Math.round(baselineMonthMinor / 30.44)
+
+  let incomeMonth = 0, everydayMonth = 0, billsMonth = 0
+  for (const t of hist) {
+    if (t.date < monthStart || t.is_transfer || t.exclude_from_budget || t.is_reimbursable) continue
+    if (t.amount_minor > 0) incomeMonth += t.amount_minor
+    else if (t.recurring_payment_id) billsMonth += -t.amount_minor
+    else everydayMonth += -t.amount_minor
+  }
+  const dayOfMonth = Number(today.slice(8, 10))
+  const daysRemaining = daysInMonth - dayOfMonth
+  const rps = (recurring.data ?? []) as { name: string; kind: string; amount_minor: number; frequency: string; next_due_date: string; status: string; is_essential: boolean }[]
+  const billsRemaining = rps
+    .filter((r) => r.status === 'active' && r.amount_minor < 0 && r.next_due_date > today && r.next_due_date <= monthEnd)
+    .reduce((s, r) => s + -r.amount_minor, 0)
+  const cash = ((accounts.data ?? []) as { account_type: string; balance_minor: number }[])
+    .filter((a) => ['current', 'cash', 'wallet'].includes(a.account_type))
+    .reduce((s, a) => s + a.balance_minor, 0)
+  const projectedEnd = cash - baselinePerDay * daysRemaining - billsRemaining
+
+  // ---- Overdraft state from the busiest current account's running balances
+  const currentIds = ((accounts.data ?? []) as { id: string; account_type: string }[])
+    .filter((a) => a.account_type === 'current').map((a) => a.id)
+  const byAccount = new Map<string, H[]>()
+  for (const t of hist) {
+    if (!currentIds.includes(t.account_id) || t.running_balance_minor === null) continue
+    byAccount.set(t.account_id, [...(byAccount.get(t.account_id) ?? []), t])
+  }
+  const odTxns = [...byAccount.values()].sort((a, b) => b.length - a.length)[0] ?? []
+  const odThisMonth = odTxns.filter((t) => t.date >= monthStart)
+  const overdrawnNow = odThisMonth.length > 0 &&
+    odThisMonth.sort((a, b) => a.date.localeCompare(b.date))[odThisMonth.length - 1].running_balance_minor! < 0
+  const odInterestYtd = hist
+    .filter((t) => t.amount_minor < 0 && /\bOD\s*INT|OVERDRAFT\s*INT/i.test(t.description))
+    .reduce((s, t) => s + -t.amount_minor, 0)
+
+  // ---- Commitments (monthly equivalents)
+  const perMonthFactor: Record<string, number> = {
+    weekly: 52 / 12, fortnightly: 26 / 12, monthly: 1, four_weekly: 13 / 12,
+    quarterly: 1 / 3, six_monthly: 1 / 6, annual: 1 / 12, custom: 1,
+  }
+  const activeOut = rps.filter((r) => r.status === 'active' && r.amount_minor < 0)
+  const commitTotal = activeOut.reduce((s, r) => s + Math.abs(r.amount_minor) * (perMonthFactor[r.frequency] ?? 1), 0)
+  const cuttable = activeOut.filter((r) => !r.is_essential)
+  const cuttableTotal = cuttable.reduce((s, r) => s + Math.abs(r.amount_minor) * (perMonthFactor[r.frequency] ?? 1), 0)
+
+  const b = budget.data as { expected_income_minor: number; budget_lines: { category_id: string | null; kind: string; planned_minor: number }[] } | null
+
   return [
-    `Today's date: ${new Date().toISOString().slice(0, 10)}`,
+    `Today's date: ${today}`,
     `\nACCOUNTS:\n${JSON.stringify(accounts.data ?? [], null, 0)}`,
     `\nDEBTS:\n${JSON.stringify(liabilities.data ?? [], null, 0)}`,
+    `\nNET WORTH (latest snapshot): ${JSON.stringify(nwSnap.data ?? null)}`,
     `\nRECURRING PAYMENTS:\n${JSON.stringify(recurring.data ?? [], null, 0)}`,
+    `\nCOMMITMENTS SUMMARY: total ~${Math.round(commitTotal)} minor/month across ${activeOut.length} active outgoings; non-essential (cuttable) ~${Math.round(cuttableTotal)} minor/month: ${cuttable.map((r) => r.name).join(', ') || 'none marked'}`,
+    `\nMONTH POSITION (engine-computed, day ${dayOfMonth} of ${daysInMonth}): income received ${incomeMonth}; bills paid ${billsMonth}; everyday spend so far ${everydayMonth}; bills still due before month end ${billsRemaining}; typical everyday spend ${baselineMonthMinor}/month (~${baselinePerDay}/day, median of last ${monthTotals.length} complete months); cash across current accounts ${cash}; PROJECTED month-end cash ${projectedEnd} (cash − remaining everyday at typical rate − bills still due). Use these for affordability, "will I run short", and pace questions — do not recompute from partial data.`,
+    `\nOVERDRAFT: currently ${overdrawnNow ? 'BELOW zero' : 'above zero'} on the main current account; overdraft interest paid since ${historyFrom}: ${odInterestYtd} minor.`,
+    `\nBUDGET THIS MONTH: ${b ? JSON.stringify({ expected_income_minor: b.expected_income_minor, lines: b.budget_lines }) : 'none set'}`,
     `\nSAVINGS GOALS:\n${JSON.stringify(goals.data ?? [], null, 0)}`,
     `\nREMEMBERED FACTS:\n${JSON.stringify(facts.data ?? [], null, 0)}`,
     `\nCATEGORIES (name (uuid)):\n${catLines}`,
@@ -952,7 +1092,10 @@ Core rules:
 - Only propose a recurring payment when the user asked for it or the evidence is strong (a document that lists it, or a clear repeating pattern). One-off or variable card payments to a company are not a direct debit. When unsure, ask — do not list speculative bills as if they were facts.
 - When an amount is mentioned without currency, assume GBP.
 - Transfers between the user's own accounts are not spending.
-- Be concise and factual. Use British English and £. Never moralise about ordinary spending.
+- The MONTH POSITION, NET WORTH, OVERDRAFT and COMMITMENTS blocks in your context are engine-computed over the full ledger. Use them directly for affordability questions ("can I afford X?", "will I run short before payday?", "what's my net worth?") instead of estimating. find_transactions aggregates (totals, counts, monthly breakdown) cover EVERY matching row even when the detail list is shorter — quote the aggregates. If its result carries a warning, repeat that caveat.
+- A debt whose balance_source is "estimated" with balance 0 has not had its real balance entered yet — say so when it affects an answer, and suggest setting the balance or uploading the agreement.
+- You give factual information and options with their maths — never a personal recommendation of a specific financial product, and never individualised instructions to settle a specific credit agreement. If arrears or unaffordable debt come up, mention that free guidance exists (MoneyHelper, StepChange).
+- Be concise and factual. Use British English and £. Never moralise about ordinary spending — deliberate spending on things the user values is a choice, not a failure. The only spending concern worth raising is funding: whether it deepens the overdraft or is covered.
 - If data is missing (no matching account, no transactions), say so plainly rather than guessing.`
 
 // ------------------------------------------------------------------ main

@@ -296,7 +296,25 @@ export default function InsightsPage() {
         Spend: Math.round(v) / 100,
       }))
     const totalMinor = rows.reduce((s, t) => s + -t.amount_minor, 0)
-    return { rows: rows.slice(0, 25), allCount: rows.length, monthly, totalMinor }
+    // Frequency behaviour: this month vs last month, visits and average size.
+    // "16 visits averaging £22, up from 9 visits" says far more than a total.
+    const nowMonth = todayIso().slice(0, 7)
+    const prevMonth = new Date(new Date(`${nowMonth}-01T00:00:00Z`).getTime() - 86400000)
+      .toISOString()
+      .slice(0, 7)
+    const inMonth = (m: string) => rows.filter((t) => t.date.slice(0, 7) === m)
+    const cur = inMonth(nowMonth)
+    const prev = inMonth(prevMonth)
+    const sum = (l: typeof rows) => l.reduce((s, t) => s + -t.amount_minor, 0)
+    return {
+      rows: rows.slice(0, 25),
+      allCount: rows.length,
+      monthly,
+      totalMinor,
+      averageMinor: rows.length ? Math.round(totalMinor / rows.length) : 0,
+      thisMonth: { count: cur.length, totalMinor: sum(cur) },
+      prevMonth: { count: prev.length, totalMinor: sum(prev) },
+    }
   }, [analytics.spend, selMerchant, selCat, parentOf])
 
   if (isLoading || !categories) return <Spinner />
@@ -649,8 +667,19 @@ export default function InsightsPage() {
             <p className="text-xs text-ink-muted">
               <span className="tnum font-semibold text-ink">{money(merchantDetail.totalMinor)}</span>
               {' '}across {merchantDetail.allCount} transaction{merchantDetail.allCount === 1 ? '' : 's'} in this range
+              {' '}· avg {money(merchantDetail.averageMinor)}
             </p>
           </div>
+          {(merchantDetail.thisMonth.count > 0 || merchantDetail.prevMonth.count > 0) && (
+            <p className="mt-1 text-xs text-ink-muted">
+              This month: <span className="tnum font-medium text-ink">{merchantDetail.thisMonth.count}</span> visit
+              {merchantDetail.thisMonth.count === 1 ? '' : 's'}, {money(merchantDetail.thisMonth.totalMinor)} · last
+              month: <span className="tnum">{merchantDetail.prevMonth.count}</span>, {money(merchantDetail.prevMonth.totalMinor)}
+              {merchantDetail.prevMonth.count > 0 && merchantDetail.thisMonth.count > merchantDetail.prevMonth.count && (
+                <span className="text-warn"> — visits up from {merchantDetail.prevMonth.count} to {merchantDetail.thisMonth.count}</span>
+              )}
+            </p>
+          )}
           {merchantDetail.monthly.length > 0 && (
             <div className="mt-2 h-40">
               <ResponsiveContainer>

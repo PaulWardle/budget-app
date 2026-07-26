@@ -7,6 +7,7 @@ import { supabase } from '@/lib/supabase'
 import { expandRecurring } from '@/lib/engine/cashflow'
 import { daysInMonth, everydayBaseline, forecastMonthEnd } from '@/lib/engine/forecast'
 import { formatMinor } from '@/lib/engine/money'
+import { analyseOverdraft } from '@/lib/engine/overdraft'
 import type { Category, RecurringPayment, Transaction } from '@/types/domain'
 
 interface Draft {
@@ -36,7 +37,7 @@ export async function generateInsights(
   txns: Transaction[],
   categories: Category[],
   recurring: RecurringPayment[],
-  opts: { cashMinor?: number } = {},
+  opts: { cashMinor?: number; currentAccountIds?: string[] } = {},
 ): Promise<number> {
   const now = new Date()
   const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
@@ -355,6 +356,64 @@ export async function generateInsights(
           impact_minor: spent - c.perMonthMinor,
           severity: 'warning',
           dedupe_key: `category_pace:${c.categoryId ?? 'none'}:${thisMonth}`,
+          period_start: periodStart,
+          period_end: periodEnd,
+        })
+      }
+    }
+  }
+
+  // --- Overdraft pattern ----------------------------------------------------
+  // The user's stated goal is staying out of the overdraft; these are the
+  // insights that make the pattern and its consequences visible.
+  const currentIds = opts.currentAccountIds ?? []
+  if (currentIds.length > 0) {
+    const byAccount = new Map<string, Transaction[]>()
+    for (const t of txns) {
+      if (!currentIds.includes(t.account_id) || t.running_balance_minor === null) continue
+      byAccount.set(t.account_id, [...(byAccount.get(t.account_id) ?? []), t])
+    }
+    const odTxns = [...byAccount.values()].sort((a, b) => b.length - a.length)[0] ?? []
+    if (odTxns.length > 0) {
+      const od = analyseOverdraft(
+        odTxns.map((t) => ({
+          date: t.date,
+          amountMinor: t.amount_minor,
+          runningBalanceMinor: t.running_balance_minor,
+          description: t.description,
+        })),
+        periodEnd,
+      )
+      const m = od.currentMonth
+      if (m && m.daysOverdrawn >= 5) {
+        drafts.push({
+          insight_type: 'overdraft_pattern',
+          headline: `Below £0 for ${m.daysOverdrawn} of ${m.daysTracked} days so far this month`,
+          body: `The account has spent ${m.daysOverdrawn} days overdrawn this month, reaching ${fmt(m.deepestMinor)} at the deepest. Days above £0 is the number to grow — money that arrives while the balance is negative is swallowed refilling the hole before it can fund anything else.`,
+          figures: { days_overdrawn: m.daysOverdrawn, days_tracked: m.daysTracked, deepest: m.deepestMinor, interest: m.interestMinor },
+          comparison_period: null,
+          confidence: 'high',
+          suggested_action: 'See the Overdraft card on Cashflow for where big incoming payments went.',
+          impact_minor: m.interestMinor || null,
+          severity: 'warning',
+          dedupe_key: `overdraft_pattern:${thisMonth}`,
+          period_start: periodStart,
+          period_end: periodEnd,
+        })
+      }
+      const absorbedThisMonth = od.lumps.filter((l) => monthKey(l.date) === thisMonth && l.absorbedMinor > 0)
+      for (const l of absorbedThisMonth) {
+        drafts.push({
+          insight_type: 'lump_absorbed',
+          headline: `${fmt(l.absorbedMinor)} of the ${fmt(l.amountMinor)} received on ${l.date} went on refilling the overdraft`,
+          body: `A payment of ${fmt(l.amountMinor)} arrived while the balance was ${fmt(l.balanceBeforeMinor ?? 0)}, so ${fmt(l.absorbedMinor)} cleared the negative balance before the rest could fund anything. Keeping the account above £0 frees payments like this for what they were meant for.`,
+          figures: { amount: l.amountMinor, absorbed: l.absorbedMinor, balance_before: l.balanceBeforeMinor },
+          comparison_period: null,
+          confidence: 'high',
+          suggested_action: null,
+          impact_minor: l.absorbedMinor,
+          severity: 'warning',
+          dedupe_key: `lump_absorbed:${l.date}:${l.amountMinor}`,
           period_start: periodStart,
           period_end: periodEnd,
         })

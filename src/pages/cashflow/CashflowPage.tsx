@@ -1,6 +1,6 @@
 import { chartAxis, dateTooltipLabel, gridStroke, tooltipStyle } from '@/components/charts/theme'
 import { PageHeader, Stat } from '@/components/shared/common'
-import { Badge, Card, CardTitle, Spinner } from '@/components/ui/primitives'
+import { Badge, Card, CardTitle, Select, Spinner } from '@/components/ui/primitives'
 import { BaselineInspector } from '@/components/shared/BaselineInspector'
 import { fetchAccounts, fetchCategories, fetchRecurring, fetchTransactions } from '@/lib/api'
 import type { Transaction } from '@/types/domain'
@@ -31,6 +31,7 @@ export default function CashflowPage() {
   const month = monthStartIso()
   const [includeTypical, setIncludeTypical] = useState(true)
   const [inspecting, setInspecting] = useState(false)
+  const [horizon, setHorizon] = useState(30)
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: recurring } = useQuery({ queryKey: ['recurring'], queryFn: fetchRecurring })
@@ -51,7 +52,6 @@ export default function CashflowPage() {
     .filter((a) => a.include_in_cashflow && ['current', 'cash', 'wallet'].includes(a.account_type))
     .reduce((s, a) => s + a.balance_minor, 0)
 
-  const horizon = 30
   const end = isoPlus(today, horizon)
   const items: ProjectedItem[] = recurring
     .filter((r) => r.status === 'active')
@@ -299,7 +299,18 @@ export default function CashflowPage() {
 
       <Card>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="mb-0">Projected daily balance — next 30 days</CardTitle>
+          <CardTitle className="mb-0">Projected daily balance — next {horizon} days</CardTitle>
+          <Select
+            className="w-28"
+            value={String(horizon)}
+            onChange={(e) => setHorizon(Number(e.target.value))}
+            aria-label="Projection horizon"
+          >
+            <option value="30">30 days</option>
+            <option value="60">60 days</option>
+            <option value="90">90 days</option>
+            <option value="180">180 days</option>
+          </Select>
           <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-ink-muted">
             <input
               type="checkbox"
@@ -334,7 +345,7 @@ export default function CashflowPage() {
                 tickFormatter={(d: string) => formatDateShort(d)}
                 tick={{ ...chartAxis, fill: 'var(--app-ink-faint)' }}
                 stroke={gridStroke}
-                interval={6}
+                interval={Math.max(6, Math.round(horizon / 5))}
               />
               <YAxis
                 tickFormatter={(v: number) => `£${Math.round(v)}`}

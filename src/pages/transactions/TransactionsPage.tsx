@@ -41,6 +41,13 @@ import { Plus, SlidersHorizontal } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
+/** Payment services that hide the real merchant: the money went THROUGH them,
+ * not TO them, so the merchant field deserves reassigning. */
+function isProcessor(merchant: string | null, description: string): boolean {
+  const hay = `${merchant ?? ''} ${description}`.toUpperCase()
+  return /PAYPAL|SUMUP|ZETTLE|SQ \*|CASH WITHDRAWAL|LINK ATM/.test(hay)
+}
+
 function titleCaseKey(s: string): string {
   return s.toLowerCase().split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 }
@@ -628,12 +635,24 @@ function TxnDialog({
             />
           </div>
           <div>
-            <Label>Merchant</Label>
+            <Label>
+              {isProcessor(txn?.merchant_name ?? null, txn?.description ?? '')
+                ? 'Who was it actually to?'
+                : 'Merchant'}
+            </Label>
             <Input
               value={form.merchant_name}
               onChange={(e) => setForm({ ...form, merchant_name: e.target.value })}
               placeholder="e.g. Tesco"
             />
+            {isProcessor(txn?.merchant_name ?? null, txn?.description ?? '') && (
+              <p className="mt-1 text-[11px] text-ink-faint">
+                Paid via {txn?.merchant_name ?? 'a payment service'} — that's the till, not the shop.
+                Put the real merchant here and what it was for in the notes; the original description
+                is kept, so searching "{(txn?.merchant_name ?? '').split(' ')[0] || 'PayPal'}" still
+                finds it.
+              </p>
+            )}
           </div>
           <div>
             <Label>Description</Label>

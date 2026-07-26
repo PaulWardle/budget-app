@@ -127,6 +127,44 @@ export default function BillsPage() {
         }
       />
 
+      {active.length > 0 && (
+        <Card>
+          <CardTitle>Commitments</CardTitle>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {(
+              [
+                ['Bills', active.filter((r) => r.kind === 'bill' && r.amount_minor < 0)],
+                ['Debts', active.filter((r) => r.kind === 'debt_payment' && r.amount_minor < 0)],
+                ['Subscriptions', active.filter((r) => r.kind === 'subscription' && r.amount_minor < 0)],
+              ] as const
+            ).map(([label, items]) => (
+              <div key={label}>
+                <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">{label}</p>
+                <p className="tnum text-base font-semibold">{money(monthlyTotal([...items]))}<span className="text-xs font-normal text-ink-faint">/mo</span></p>
+                <p className="text-[11px] text-ink-faint">
+                  {items.length} item{items.length === 1 ? '' : 's'} · {money(monthlyTotal([...items]) * 12)}/yr
+                </p>
+              </div>
+            ))}
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">Could be cut</p>
+              <p className="tnum text-base font-semibold text-accent">
+                {money(monthlyTotal(active.filter((r) => !r.is_essential && r.amount_minor < 0)))}
+                <span className="text-xs font-normal text-ink-faint">/mo</span>
+              </p>
+              <p className="text-[11px] text-ink-faint">
+                {money(monthlyTotal(active.filter((r) => !r.is_essential && r.amount_minor < 0)) * 12)}/yr if
+                everything non-essential went
+              </p>
+            </div>
+          </div>
+          <p className="mt-2 text-[11px] text-ink-faint">
+            "Could be cut" counts anything not marked essential — open a bill to change its essential
+            flag. Things you value stay essential; this is the honest floor, not a demand to cut.
+          </p>
+        </Card>
+      )}
+
       {priceRises.length > 0 && (
         <Card>
           <CardTitle>Price changes</CardTitle>
