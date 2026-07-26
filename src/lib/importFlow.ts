@@ -28,6 +28,44 @@ export function isSupportedUpload(file: File): boolean {
   )
 }
 
+/**
+ * Upload a loan/finance agreement and extract its terms. Unlike statements,
+ * the output is a proposed loan_contracts row for the Debts page to review
+ * and apply — never ledger transactions.
+ */
+export async function processContractUpload(userId: string, file: File): Promise<UploadOutcome> {
+  if (isCsvFile(file)) throw new Error('Agreements should be a PDF or photo, not a CSV')
+  const doc = await uploadDocument(userId, file, 'contract')
+  const { data: batch, error: bErr } = await supabase
+    .from('import_batches')
+    .insert({
+      user_id: userId,
+      document_id: doc.id,
+      source_type: file.type === 'application/pdf' ? 'pdf' : 'screenshot',
+      file_name: file.name,
+      status: 'processing',
+    })
+    .select()
+    .single()
+  if (bErr) throw new Error(bErr.message)
+  const { data: session } = await supabase.auth.getSession()
+  const { error: fnErr } = await supabase.functions.invoke('ai-extract', {
+    body: { batch_id: batch.id, document_id: doc.id, kind: 'contract' },
+    headers: { Authorization: `Bearer ${session.session?.access_token}` },
+  })
+  if (fnErr) {
+    let message = 'AI extraction failed — could not reach the ai-extract function.'
+    const resp = (fnErr as { context?: unknown }).context
+    if (resp instanceof Response) {
+      const errBody = (await resp.json().catch(() => null)) as { error?: string } | null
+      if (errBody?.error) message = errBody.error
+    }
+    await supabase.from('import_batches').update({ status: 'failed', error: message }).eq('id', batch.id)
+    return { batchId: batch.id, status: 'failed', extracted: 0, fileName: file.name, error: message }
+  }
+  return { batchId: batch.id, status: 'processing', extracted: 0, fileName: file.name }
+}
+
 /** Upload one file for an account and run it through extraction.
  * Returns the batch outcome; throws only on upload/infrastructure errors. */
 export async function processUpload(

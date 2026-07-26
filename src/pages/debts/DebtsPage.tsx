@@ -12,12 +12,20 @@ import {
   Spinner,
 } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchLiabilities, upsertLiability } from '@/lib/api'
+import {
+  applyContract,
+  dismissContract,
+  fetchLiabilities,
+  fetchPendingContracts,
+  upsertLiability,
+  type PendingContract,
+} from '@/lib/api'
+import { processContractUpload } from '@/lib/importFlow'
 import { formatDate, money } from '@/lib/format'
 import type { Liability, LiabilityType } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus } from 'lucide-react'
-import { useState } from 'react'
+import { FileUp, Plus } from 'lucide-react'
+import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 export const LIABILITY_LABELS: Record<LiabilityType, string> = {
@@ -44,11 +52,43 @@ export default function DebtsPage() {
   const userId = useUserId()
   const qc = useQueryClient()
   const { data: liabilities, isLoading } = useQuery({ queryKey: ['liabilities'], queryFn: fetchLiabilities })
+  const { data: pendingContracts } = useQuery({
+    queryKey: ['loan-contracts'],
+    queryFn: fetchPendingContracts,
+    refetchInterval: (q) => ((q.state.data ?? []).length > 0 || uploadingRef.current ? 5000 : false),
+  })
   const [adding, setAdding] = useState(false)
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const uploadingRef = useRef(false)
+
+  const upload = useMutation({
+    mutationFn: async (file: File) => {
+      uploadingRef.current = true
+      return processContractUpload(userId, file)
+    },
+    onSuccess: (r) => {
+      setUploadMsg(
+        r.status === 'failed'
+          ? (r.error ?? 'Extraction failed')
+          : 'Reading the agreement — terms will appear below shortly.',
+      )
+      void qc.invalidateQueries({ queryKey: ['loan-contracts'] })
+    },
+    onError: (e: Error) => setUploadMsg(e.message),
+    onSettled: () => {
+      setTimeout(() => {
+        uploadingRef.current = false
+      }, 60_000)
+    },
+  })
 
   if (isLoading) return <Spinner />
   const active = (liabilities ?? []).filter((l) => l.status === 'active')
   const total = active.reduce((s, l) => s + l.current_balance_minor, 0)
+  const needsBalance = active.filter(
+    (l) => l.current_balance_minor === 0 && l.balance_source === 'estimated',
+  )
 
   return (
     <div>
@@ -56,15 +96,58 @@ export default function DebtsPage() {
         title="Debts"
         sub={`Total owed: ${money(total)} across ${active.length} ${active.length === 1 ? 'debt' : 'debts'}`}
         actions={
-          <Button onClick={() => setAdding(true)}>
-            <Plus className="h-4 w-4" /> Add debt
-          </Button>
+          <>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) upload.mutate(f)
+                e.target.value = ''
+              }}
+            />
+            <Button variant="outline" onClick={() => fileRef.current?.click()} disabled={upload.isPending}>
+              {upload.isPending ? <Spinner className="h-4 w-4" /> : <FileUp className="h-4 w-4" />} Upload agreement
+            </Button>
+            <Button onClick={() => setAdding(true)}>
+              <Plus className="h-4 w-4" /> Add debt
+            </Button>
+          </>
         }
       />
+      {uploadMsg && <p className="mb-3 text-xs text-ink-muted">{uploadMsg}</p>}
+
+      {needsBalance.length > 0 && (
+        <Card className="mb-3 border-warn/40">
+          <p className="text-sm">
+            <Badge tone="warn" className="mr-1.5">action needed</Badge>
+            {needsBalance.length === 1 ? 'One debt needs its' : `${needsBalance.length} debts need their`} real
+            balance. Payments are tracked, but payoff dates and net worth stay wrong until the balance is set —
+            tap a debt and enter what's owed, or upload its agreement and it'll be read for you.
+          </p>
+        </Card>
+      )}
+
+      {(pendingContracts ?? []).map((c) => (
+        <ContractReviewCard
+          key={c.id}
+          contract={c}
+          liabilities={active}
+          userId={userId}
+          onDone={() => {
+            void qc.invalidateQueries({ queryKey: ['loan-contracts'] })
+            void qc.invalidateQueries({ queryKey: ['liabilities'] })
+            void qc.invalidateQueries({ queryKey: ['networth'] })
+          }}
+        />
+      ))}
+
       {active.length === 0 && (
         <EmptyState
           title="No debts tracked"
-          hint='Add one manually, upload a loan contract on Imports, or tell the AI chat e.g. "I still owe £500 on PayPal".'
+          hint='Add one manually, upload a loan agreement above, or tell the AI chat e.g. "I still owe £500 on PayPal".'
         />
       )}
       <div className="space-y-2">
@@ -138,6 +221,92 @@ export default function DebtsPage() {
         />
       )}
     </div>
+  )
+}
+
+const CONTRACT_FIELDS: { key: string; label: string; money?: boolean }[] = [
+  { key: 'lender', label: 'Lender' },
+  { key: 'original_amount_minor', label: 'Amount borrowed', money: true },
+  { key: 'current_balance_minor', label: 'Balance', money: true },
+  { key: 'apr', label: 'APR %' },
+  { key: 'monthly_payment_minor', label: 'Monthly payment', money: true },
+  { key: 'term_months', label: 'Term (months)' },
+  { key: 'start_date', label: 'Start date' },
+  { key: 'final_payment_minor', label: 'Final payment', money: true },
+  { key: 'balloon_minor', label: 'Balloon', money: true },
+  { key: 'overpayment_rule', label: 'Overpayments' },
+]
+
+function ContractReviewCard({
+  contract,
+  liabilities,
+  userId,
+  onDone,
+}: {
+  contract: PendingContract
+  liabilities: Liability[]
+  userId: string
+  onDone: () => void
+}) {
+  const x = contract.extracted as Record<string, unknown>
+  // Best guess at which debt this agreement belongs to, by lender name
+  const lender = String(x.lender ?? '').toUpperCase()
+  const guess = liabilities.find(
+    (l) =>
+      lender &&
+      (l.provider?.toUpperCase().includes(lender.split(' ')[0]) ||
+        lender.includes((l.provider ?? '¤').toUpperCase().split(' ')[0])),
+  )
+  const [target, setTarget] = useState<string>(guess?.id ?? 'new')
+  const apply = useMutation({
+    mutationFn: () => applyContract(userId, contract, target === 'new' ? null : target),
+    onSuccess: onDone,
+  })
+  const dismiss = useMutation({
+    mutationFn: () => dismissContract(contract.id),
+    onSuccess: onDone,
+  })
+  const found = CONTRACT_FIELDS.filter((f) => x[f.key] !== null && x[f.key] !== undefined)
+  return (
+    <Card className="mb-3 border-accent/40">
+      <p className="mb-2 text-sm font-semibold">
+        Agreement read{x.lender ? ` — ${String(x.lender)}` : ''}
+        <Badge tone="accent" className="ml-1.5">review</Badge>
+      </p>
+      <div className="mb-3 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+        {found.map((f) => (
+          <p key={f.key} className="text-xs">
+            <span className="text-ink-faint">{f.label}: </span>
+            <span className="tnum font-medium">
+              {f.money ? money(Number(x[f.key])) : String(x[f.key])}
+            </span>
+          </p>
+        ))}
+        {found.length === 0 && (
+          <p className="text-xs text-ink-faint">Nothing could be read from this document.</p>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Select className="w-56" value={target} onChange={(e) => setTarget(e.target.value)}>
+          {liabilities.map((l) => (
+            <option key={l.id} value={l.id}>
+              Apply to: {l.name}
+            </option>
+          ))}
+          <option value="new">Create a new debt</option>
+        </Select>
+        <Button size="sm" onClick={() => apply.mutate()} disabled={apply.isPending || found.length === 0}>
+          {apply.isPending ? 'Applying…' : 'Apply terms'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => dismiss.mutate()}>
+          Discard
+        </Button>
+      </div>
+      <p className="mt-2 text-[11px] text-ink-faint">
+        Terms from the agreement override what's on the debt — but only fields the document actually
+        states. Everything stays editable afterwards.
+      </p>
+    </Card>
   )
 }
 

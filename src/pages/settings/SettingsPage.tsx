@@ -218,6 +218,39 @@ export default function SettingsPage() {
             </p>
           </div>
           <div>
+            <Label>Household contributor (name on their transfers)</Label>
+            <Input
+              defaultValue={(profile.household_contributor as string | null) ?? ''}
+              onBlur={(e) => {
+                const v = e.target.value.trim()
+                if (v !== ((profile.household_contributor as string | null) ?? '')) {
+                  saveProfile.mutate({ household_contributor: v || null })
+                }
+              }}
+              placeholder="e.g. surname on the transfer"
+            />
+            <p className="mt-1 text-[11px] text-ink-faint">
+              Someone who regularly puts money in. Large payments from them are proposed as
+              "Household contribution" income (flagged for a one-tap check); small ones are treated
+              as repayments — transfers, not income.
+            </p>
+          </div>
+          <div>
+            <Label>"Large" threshold for those payments</Label>
+            <Input
+              inputMode="numeric"
+              defaultValue={((profile.household_contribution_threshold_minor as number | null) ?? 50000) / 100}
+              onBlur={(e) => {
+                const v = Math.round(Number(e.target.value) * 100)
+                if (v > 0 && v !== (profile.household_contribution_threshold_minor as number)) {
+                  saveProfile.mutate({ household_contribution_threshold_minor: v })
+                }
+              }}
+              placeholder="500"
+            />
+            <p className="mt-1 text-[11px] text-ink-faint">In pounds. Payments at or above this count as income.</p>
+          </div>
+          <div>
             <Label>Usual payday (day of month)</Label>
             <Input
               inputMode="numeric"

@@ -721,6 +721,151 @@ export async function upsertLiability(
   return row
 }
 
+/**
+ * Link ledger transactions to debts and log them as payments, so paying a
+ * debt actually moves its record. Matching runs through recurring payments
+ * (bill → liability), which the detector maintains — no fuzzy matching here.
+ * Backfilled history never adjusts balances; only payments dated after the
+ * liability's stated balance date reduce it, so a user-stated balance stays
+ * the source of truth for everything before it.
+ */
+export async function syncDebtLinks(userId: string): Promise<number> {
+  const { data: rps } = await supabase
+    .from('recurring_payments')
+    .select('id,liability_id')
+    .not('liability_id', 'is', null)
+  const map = new Map((rps ?? []).map((r) => [r.id as string, r.liability_id as string]))
+  if (map.size === 0) return 0
+
+  const { data: unlinked } = await supabase
+    .from('transactions')
+    .select('id,date,amount_minor,recurring_payment_id')
+    .is('liability_id', null)
+    .not('recurring_payment_id', 'is', null)
+    .lt('amount_minor', 0)
+  const candidates = (unlinked ?? []).filter((t) => map.has(t.recurring_payment_id as string))
+  let linked = 0
+  for (const t of candidates) {
+    const liabilityId = map.get(t.recurring_payment_id as string)!
+    await supabase.from('transactions').update({ liability_id: liabilityId }).eq('id', t.id)
+    const { data: liab } = await supabase
+      .from('liabilities')
+      .select('current_balance_minor,balance_effective_date')
+      .eq('id', liabilityId)
+      .single()
+    const { error } = await supabase.from('debt_payments').insert({
+      user_id: userId,
+      liability_id: liabilityId,
+      transaction_id: t.id,
+      date: t.date,
+      amount_minor: -(t.amount_minor as number),
+      kind: 'scheduled',
+      source: 'matched',
+    })
+    if (error) continue
+    linked++
+    if (liab && t.date > (liab.balance_effective_date as string)) {
+      const newBalance = Math.max(
+        0,
+        (liab.current_balance_minor as number) - -(t.amount_minor as number),
+      )
+      await supabase
+        .from('liabilities')
+        .update({
+          current_balance_minor: newBalance,
+          balance_source: 'calculated',
+          balance_effective_date: t.date,
+        })
+        .eq('id', liabilityId)
+    }
+  }
+  if (linked > 0) await writeNetWorthSnapshot(userId)
+  return linked
+}
+
+export interface PendingContract {
+  id: string
+  document_id: string | null
+  extracted: Record<string, unknown>
+  confidence: number | null
+  status: string
+  created_at: string
+}
+
+export async function fetchPendingContracts(): Promise<PendingContract[]> {
+  const { data, error } = await supabase
+    .from('loan_contracts')
+    .select('*')
+    .eq('status', 'proposed')
+    .order('created_at', { ascending: false })
+  throwIf(error)
+  return (data ?? []) as PendingContract[]
+}
+
+/**
+ * Apply an extracted agreement's terms to a liability. Extracted terms
+ * override what's on the record (the agreement is the better source), but
+ * only fields the extraction actually found — nulls never blank real data.
+ */
+export async function applyContract(
+  userId: string,
+  contract: PendingContract,
+  liabilityId: string | null,
+): Promise<Liability> {
+  const x = contract.extracted as Record<string, unknown>
+  const val = <T>(k: string): T | undefined => (x[k] === null || x[k] === undefined ? undefined : (x[k] as T))
+  const patch: Partial<Liability> = {}
+  const balance = val<number>('current_balance_minor')
+  if (val<number>('original_amount_minor') !== undefined) patch.original_balance_minor = val<number>('original_amount_minor')!
+  if (balance !== undefined) {
+    patch.current_balance_minor = balance
+    patch.balance_source = 'imported'
+    patch.balance_effective_date = new Date().toISOString().slice(0, 10)
+  }
+  if (val<number>('apr') !== undefined) patch.apr = val<number>('apr')!
+  if (val<string>('rate_type') !== undefined) patch.rate_type = val<string>('rate_type') as Liability['rate_type']
+  if (val<string>('start_date') !== undefined) patch.start_date = val<string>('start_date')!
+  if (val<number>('term_months') !== undefined) patch.term_months = val<number>('term_months')!
+  if (val<number>('monthly_payment_minor') !== undefined) patch.monthly_payment_minor = val<number>('monthly_payment_minor')!
+  if (val<number>('payment_day') !== undefined) patch.payment_day = val<number>('payment_day')!
+  if (val<number>('fees_minor') !== undefined) patch.fees_minor = val<number>('fees_minor')!
+  if (val<number>('final_payment_minor') !== undefined) patch.final_payment_minor = val<number>('final_payment_minor')!
+  if (val<number>('balloon_minor') !== undefined) patch.balloon_minor = val<number>('balloon_minor')!
+  if (val<number>('settlement_quote_minor') !== undefined) patch.settlement_quote_minor = val<number>('settlement_quote_minor')!
+  if (val<string>('settlement_quote_expiry') !== undefined) patch.settlement_quote_expiry = val<string>('settlement_quote_expiry')!
+  if (val<string>('early_repayment_terms') !== undefined) patch.early_repayment_terms = val<string>('early_repayment_terms')!
+  if (val<string>('overpayment_rule') !== undefined) patch.overpayment_rule = val<string>('overpayment_rule') as Liability['overpayment_rule']
+  if (val<string>('agreement_ref') !== undefined) patch.agreement_ref = val<string>('agreement_ref')!
+
+  let row: Liability
+  if (liabilityId) {
+    row = await upsertLiability(userId, patch as Partial<Liability> & { name: string; liability_type: Liability['liability_type'] }, liabilityId, 'import')
+  } else {
+    row = await upsertLiability(
+      userId,
+      {
+        name: val<string>('lender') ?? 'New agreement',
+        provider: val<string>('lender') ?? null,
+        liability_type: (val<string>('liability_type') as Liability['liability_type']) ?? 'other',
+        current_balance_minor: balance ?? 0,
+        ...patch,
+      } as Partial<Liability> & { name: string; liability_type: Liability['liability_type'] },
+      undefined,
+      'import',
+    )
+  }
+  await supabase
+    .from('loan_contracts')
+    .update({ status: 'confirmed', liability_id: row.id, confirmed_at: new Date().toISOString() })
+    .eq('id', contract.id)
+  return row
+}
+
+export async function dismissContract(id: string): Promise<void> {
+  const { error } = await supabase.from('loan_contracts').update({ status: 'rejected' }).eq('id', id)
+  throwIf(error)
+}
+
 export async function fetchDebtPayments(liabilityId: string): Promise<DebtPayment[]> {
   const { data, error } = await supabase
     .from('debt_payments')

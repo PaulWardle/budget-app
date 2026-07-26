@@ -52,6 +52,10 @@ export default function HomePage() {
     queryKey: ['transactions', 'history', historyFrom],
     queryFn: () => fetchTransactions({ from: historyFrom, limit: 3000 }),
   })
+  const { data: uncategorised } = useQuery({
+    queryKey: ['transactions', 'uncategorised-count'],
+    queryFn: () => fetchTransactions({ uncategorised: true, limit: 1000 }),
+  })
 
   if (!accounts || !liabilities || !txns || !categories || !recurring) {
     return (
@@ -466,6 +470,34 @@ export default function HomePage() {
           </p>
         )}
       </Card>
+
+      {/* Data quality — numbers are only as good as the rows behind them */}
+      {((uncategorised ?? []).length > 0 || txns.some((t) => t.needs_review)) && (
+        <Card>
+          <CardTitle>Tidy-ups</CardTitle>
+          <div className="space-y-1.5 text-sm">
+            {(uncategorised ?? []).length > 0 && (
+              <p>
+                <Link to="/transactions?uncategorised=1" className="text-accent hover:underline">
+                  {(uncategorised ?? []).length} transaction{(uncategorised ?? []).length === 1 ? '' : 's'} without a category
+                </Link>
+                <span className="text-ink-muted">
+                  {' '}— totals and forecasts treat them as a blind spot until they're filed.
+                </span>
+              </p>
+            )}
+            {txns.some((t) => t.needs_review) && (
+              <p>
+                <Link to="/transactions" className="text-accent hover:underline">
+                  {txns.filter((t) => t.needs_review).length} recent item
+                  {txns.filter((t) => t.needs_review).length === 1 ? '' : 's'} flagged for review
+                </Link>
+                <span className="text-ink-muted"> — low-confidence imports and proposed classifications.</span>
+              </p>
+            )}
+          </div>
+        </Card>
+      )}
 
       {/* Categories at risk */}
       {atRisk.length > 0 && categories && (

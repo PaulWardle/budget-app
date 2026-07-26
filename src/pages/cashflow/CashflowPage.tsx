@@ -12,6 +12,7 @@ import {
 } from '@/lib/engine/cashflow'
 import { categoryActuals } from '@/lib/engine/budget'
 import { everydayBaseline, forecastMonthEnd, typicalSpendItems } from '@/lib/engine/forecast'
+import { analyseOverdraft } from '@/lib/engine/overdraft'
 import { daysInMonthOf, formatDateShort, money, monthStartIso, todayIso } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -81,6 +82,27 @@ export default function CashflowPage() {
 
   const projection = projectDailyBalances(opening, allItems, today, horizon)
   const sts = safeToSpend(opening, projection)
+
+  // Overdraft pattern for the busiest current account (running balances are
+  // per-account, so a merged series would be meaningless).
+  const currentAccounts = accounts.filter((a) => a.account_type === 'current' && !a.archived_at)
+  const odAccount = currentAccounts
+    .map((a) => ({ a, n: history.filter((t) => t.account_id === a.id && t.running_balance_minor !== null).length }))
+    .sort((x, y) => y.n - x.n)[0]
+  const overdraft =
+    odAccount && odAccount.n > 0
+      ? analyseOverdraft(
+          history
+            .filter((t) => t.account_id === odAccount.a.id)
+            .map((t) => ({
+              date: t.date,
+              amountMinor: t.amount_minor,
+              runningBalanceMinor: t.running_balance_minor,
+              description: t.description,
+            })),
+          today,
+        )
+      : null
 
   const monthEnd = `${month.slice(0, 8)}${String(daysInMonthOf(month)).padStart(2, '0')}`
   const forecast = forecastMonthEnd({
@@ -208,6 +230,61 @@ export default function CashflowPage() {
           </>
         )}
       </Card>
+
+      {overdraft && overdraft.currentMonth && (
+        <Card>
+          <CardTitle>Overdraft</CardTitle>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Stat
+              label="Days above £0 this month"
+              value={`${overdraft.currentMonth.daysAboveZero} of ${overdraft.currentMonth.daysTracked}`}
+              tone={overdraft.currentMonth.daysOverdrawn === 0 ? 'good' : 'warn'}
+              sub="the number to grow"
+            />
+            <Stat
+              label="Deepest this month"
+              value={money(overdraft.currentMonth.deepestMinor)}
+              tone={overdraft.currentMonth.deepestMinor < 0 ? 'bad' : 'good'}
+            />
+            <Stat
+              label="Interest this month"
+              value={money(overdraft.currentMonth.interestMinor)}
+              sub={`${money(overdraft.totalInterestMinor)} over ${overdraft.months.length} months`}
+            />
+            <Stat
+              label="Lump payments absorbed"
+              value={money(overdraft.totalAbsorbedMinor)}
+              tone={overdraft.totalAbsorbedMinor > 0 ? 'warn' : undefined}
+              sub="swallowed refilling a negative balance"
+            />
+          </div>
+          {overdraft.lumps.filter((l) => l.absorbedMinor > 0).length > 0 && (
+            <div className="mt-3 border-t border-border pt-2">
+              <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-ink-faint">
+                Where big incoming payments went
+              </p>
+              {overdraft.lumps.map((l, i) => (
+                <div key={i} className="flex items-center justify-between py-0.5 text-xs">
+                  <span className="text-ink-muted">
+                    <span className="tnum mr-2 text-ink-faint">{formatDateShort(l.date)}</span>
+                    {money(l.amountMinor)} in
+                  </span>
+                  <span className={`tnum ${l.absorbedMinor > 0 ? 'text-warn' : 'text-good'}`}>
+                    {l.absorbedMinor > 0
+                      ? `${money(l.absorbedMinor)} refilled the overdraft`
+                      : 'landed above £0'}
+                  </span>
+                </div>
+              ))}
+              <p className="mt-1.5 text-[11px] text-ink-faint">
+                Money that arrives while the balance is negative clears the hole before it can fund
+                anything else. Keeping the account above £0 is what frees these payments for the
+                things they were meant for.
+              </p>
+            </div>
+          )}
+        </Card>
+      )}
 
       <Card>
         <CardTitle>This month so far</CardTitle>

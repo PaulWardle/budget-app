@@ -96,6 +96,27 @@ function normalise(raw: string): string {
   return raw.toUpperCase().replace(/\d{2,}/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
+// Word-boundary rule matching, mirroring src/lib/engine/rules.ts — a substring
+// hit inside a longer word (the "EE" in "LEEK") must never match.
+const isAlnum = (ch: string | undefined): boolean => !!ch && /[A-Z0-9]/.test(ch)
+function boundaryMatch(hay: string, matcher: string, matchType: string): boolean {
+  const needle = matcher.trim().toUpperCase()
+  if (!needle) return false
+  if (matchType === 'exact') return hay === needle
+  if (matchType === 'starts_with') {
+    return hay.startsWith(needle) && !isAlnum(hay[needle.length])
+  }
+  let from = 0
+  for (;;) {
+    const at = hay.indexOf(needle, from)
+    if (at === -1) return false
+    const before = at === 0 ? undefined : hay[at - 1]
+    const after = hay[at + needle.length]
+    if (!isAlnum(before) && !isAlnum(after)) return true
+    from = at + 1
+  }
+}
+
 interface ExtractedTxn {
   date: string
   description: string
@@ -253,9 +274,12 @@ async function runExtraction(
         status: 'proposed',
       })
     if (error) return fail(error.message)
+    // Contracts don't go through the transaction review screen — the Debts
+    // page reviews the proposed loan_contracts row instead, so the batch is
+    // simply done.
     await ctx.supabase
       .from('import_batches')
-      .update({ status: 'review', ai_model: MODEL, stats: { extracted: 1 } })
+      .update({ status: 'completed', ai_model: MODEL, stats: { extracted: 1 }, completed_at: new Date().toISOString() })
       .eq('id', body.batch_id)
     return
   }
@@ -353,11 +377,7 @@ async function runExtraction(
     let categoryId: string | null = null
     const hay = t.description.toUpperCase()
     for (const r of (rules ?? []) as { matcher: string; match_type: string; category_id: string | null }[]) {
-      const hit =
-        r.match_type === 'exact' ? hay === r.matcher
-        : r.match_type === 'starts_with' ? hay.startsWith(r.matcher)
-        : hay.includes(r.matcher)
-      if (hit) {
+      if (boundaryMatch(hay, r.matcher, r.match_type)) {
         categoryId = r.category_id
         break
       }
