@@ -133,6 +133,23 @@ const actionSchemas = {
     confidence: z.enum(['confirmed', 'likely']).default('confirmed'),
     affects_calculations: z.boolean().default(false),
   }),
+  create_project: z.object({
+    name: z.string().min(1).max(120),
+    budget_minor: z.number().int().positive().nullish(),
+    target_date: isoDate.nullish(),
+    notes: z.string().max(500).nullish(),
+  }),
+  assign_to_project: z.object({
+    project_name: z.string().min(1).max(120),
+    search: z.string().min(2).max(200),
+    from: isoDate.nullish(),
+    to: isoDate.nullish(),
+    limit: z.number().int().min(1).max(500).default(100),
+  }),
+  contribute_to_goal: z.object({
+    goal_name: z.string().min(1).max(120),
+    amount_minor: z.number().int().positive(),
+  }),
   find_transactions: z.object({
     search: z.string().max(200).nullish(),
     merchant: z.string().max(200).nullish(),
@@ -396,6 +413,50 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
         affects_calculations: { type: 'boolean' },
       },
       required: ['fact_type', 'fact_key', 'value'],
+    },
+  },
+  {
+    name: 'create_project',
+    description:
+      'Create a project — a named pot of one-off spending (a bike build, a holiday, house work) tracked against an optional budget. Use when the user wants to track a project.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        budget_minor: { type: 'integer', description: 'Optional budget in pence' },
+        target_date: { type: 'string' },
+        notes: { type: 'string' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'assign_to_project',
+    description:
+      'Assign matching transactions to a project, e.g. "put the Screwfix stuff under the bathroom project". Matches description/merchant like find_transactions and marks the rows one-off so project spend never inflates the everyday baseline.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        project_name: { type: 'string', description: 'Existing project name (from context)' },
+        search: { type: 'string', description: 'Matches description/merchant, e.g. SCREWFIX' },
+        from: { type: 'string' },
+        to: { type: 'string' },
+        limit: { type: 'integer' },
+      },
+      required: ['project_name', 'search'],
+    },
+  },
+  {
+    name: 'contribute_to_goal',
+    description:
+      'Record money added to a savings goal, e.g. "I put £200 in the emergency fund". Increments the goal and marks it achieved when the target is reached. Goals that track a linked account update themselves — do not use this for those.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        goal_name: { type: 'string', description: 'Existing goal name (from context)' },
+        amount_minor: { type: 'integer', description: 'Positive pence added' },
+      },
+      required: ['goal_name', 'amount_minor'],
     },
   },
   {
@@ -872,6 +933,80 @@ async function executeAction(
         undoable: true,
       }
     }
+    case 'create_project': {
+      const i = input as z.infer<(typeof actionSchemas)['create_project']>
+      const { data, error } = await supabase
+        .from('projects')
+        .insert({ ...i, user_id: userId, status: 'active' })
+        .select('id')
+        .single()
+      if (error) throw new Error(error.message)
+      return {
+        summary: `Created project "${i.name}"${i.budget_minor ? ` with a ${fmt(i.budget_minor)} budget` : ''}`,
+        undoData: { table: 'projects', id: data.id },
+        undoable: true,
+      }
+    }
+    case 'assign_to_project': {
+      const i = input as z.infer<(typeof actionSchemas)['assign_to_project']>
+      const { data: project } = await supabase
+        .from('projects')
+        .select('id,name')
+        .neq('status', 'abandoned')
+        .ilike('name', `%${i.project_name}%`)
+        .maybeSingle()
+      if (!project) throw new Error(`Project "${i.project_name}" not found — create it first`)
+      let q = supabase
+        .from('transactions')
+        .select('id,amount_minor')
+        .or(`description.ilike.%${i.search}%,merchant_name.ilike.%${i.search}%`)
+        .limit(i.limit)
+      if (i.from) q = q.gte('date', i.from)
+      if (i.to) q = q.lte('date', i.to)
+      const { data: matches, error: qErr } = await q
+      if (qErr) throw new Error(qErr.message)
+      const rows = (matches ?? []) as { id: string; amount_minor: number }[]
+      if (rows.length === 0) throw new Error(`No transactions match "${i.search}"`)
+      const { error } = await supabase
+        .from('transactions')
+        .update({ project_id: (project as { id: string }).id, is_one_off: true })
+        .in('id', rows.map((r) => r.id))
+      if (error) throw new Error(error.message)
+      const total = rows.filter((r) => r.amount_minor < 0).reduce((s, r) => s + -r.amount_minor, 0)
+      return {
+        summary: `Assigned ${rows.length} transaction(s) (${fmt(total)} spend) to ${(project as { name: string }).name}. They're marked one-off so they won't inflate the everyday baseline.`,
+        result: { assigned: rows.length, total_spend_minor: total },
+        undoData: { table: 'transactions' },
+        undoable: false,
+      }
+    }
+    case 'contribute_to_goal': {
+      const i = input as z.infer<(typeof actionSchemas)['contribute_to_goal']>
+      const { data: goal } = await supabase
+        .from('savings_goals')
+        .select('id,name,current_minor,target_minor,linked_account_id')
+        .eq('status', 'active')
+        .ilike('name', `%${i.goal_name}%`)
+        .maybeSingle()
+      if (!goal) throw new Error(`Active savings goal "${i.goal_name}" not found`)
+      const g = goal as { id: string; name: string; current_minor: number; target_minor: number; linked_account_id: string | null }
+      if (g.linked_account_id) {
+        throw new Error(`${g.name} tracks a linked account balance — update that account instead`)
+      }
+      const next = g.current_minor + i.amount_minor
+      const achieved = next >= g.target_minor
+      const { error } = await supabase
+        .from('savings_goals')
+        .update({ current_minor: next, ...(achieved ? { status: 'achieved' } : {}) })
+        .eq('id', g.id)
+      if (error) throw new Error(error.message)
+      return {
+        summary: `Added ${fmt(i.amount_minor)} to ${g.name} — now ${fmt(next)} of ${fmt(g.target_minor)}${achieved ? ' — goal achieved 🎉' : ''}`,
+        result: { current_minor: next, achieved },
+        undoData: { table: 'savings_goals', id: g.id, previous: { current_minor: g.current_minor } },
+        undoable: true,
+      }
+    }
     case 'find_transactions': {
       const i = input as z.infer<(typeof actionSchemas)['find_transactions']>
       // Aggregates must cover EVERY matching row, not just the page shown —
@@ -1001,7 +1136,7 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
     supabase.from('liabilities').select('id,name,provider,liability_type,current_balance_minor,apr,monthly_payment_minor,balance_source,balance_effective_date').neq('status', 'archived'),
     supabase.from('recurring_payments').select('id,name,kind,amount_minor,frequency,next_due_date,status,is_essential,liability_id'),
     supabase.from('financial_facts').select('fact_type,fact_key,value,confidence').eq('is_active', true).limit(50),
-    supabase.from('savings_goals').select('id,name,target_minor,current_minor').neq('status', 'archived'),
+    supabase.from('savings_goals').select('id,name,target_minor,current_minor,monthly_planned_minor,linked_account_id,status').neq('status', 'archived'),
     supabase.from('profiles').select('payday_day').maybeSingle(),
     supabase.from('net_worth_snapshots').select('date,assets_minor,liabilities_minor,net_worth_minor').order('date', { ascending: false }).limit(1).maybeSingle(),
     supabase
@@ -1016,7 +1151,19 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
   // The budget row is keyed to the month the period pays for (period ending
   // 24 Aug → the August budget).
   const budgetMonth = `${period.end.slice(0, 7)}-01`
-  const budget = await supabase.from('budgets').select('*, budget_lines(*)').eq('month', budgetMonth).maybeSingle()
+  const [budget, projects, projectTxns] = await Promise.all([
+    supabase.from('budgets').select('*, budget_lines(*)').eq('month', budgetMonth).maybeSingle(),
+    supabase.from('projects').select('id,name,status,budget_minor,target_date').neq('status', 'abandoned'),
+    supabase.from('transactions').select('project_id,amount_minor,is_transfer').not('project_id', 'is', null),
+  ])
+  const projectSpend = new Map<string, number>()
+  for (const t of (projectTxns.data ?? []) as { project_id: string; amount_minor: number; is_transfer: boolean }[]) {
+    if (t.is_transfer) continue
+    projectSpend.set(t.project_id, (projectSpend.get(t.project_id) ?? 0) + -t.amount_minor)
+  }
+  const projectLines = ((projects.data ?? []) as { id: string; name: string; status: string; budget_minor: number | null; target_date: string | null }[])
+    .map((p) => `- ${p.name} (${p.status}): spent ${projectSpend.get(p.id) ?? 0}${p.budget_minor ? ` of ${p.budget_minor} budget` : ', no budget'}${p.target_date ? `, target ${p.target_date}` : ''}`)
+    .join('\n')
 
   const cats = (categories.data ?? []) as { id: string; name: string; parent_id: string | null }[]
   const catLines = cats
@@ -1116,6 +1263,7 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
     `\nOVERDRAFT: currently ${overdrawnNow ? 'BELOW zero' : 'above zero'} on the main current account; overdraft interest paid since ${historyFrom}: ${odInterestYtd} minor.`,
     `\nBUDGET THIS PERIOD (stored as the ${budgetMonth.slice(0, 7)} budget): ${b ? JSON.stringify({ expected_income_minor: b.expected_income_minor, lines: b.budget_lines }) : 'none set'}`,
     `\nSAVINGS GOALS:\n${JSON.stringify(goals.data ?? [], null, 0)}`,
+    `\nPROJECTS (one-off spending pots; amounts in minor units):\n${projectLines || 'none yet'}`,
     `\nREMEMBERED FACTS:\n${JSON.stringify(facts.data ?? [], null, 0)}`,
     `\nCATEGORIES (name (uuid)):\n${catLines}`,
   ].join('\n')
@@ -1129,6 +1277,7 @@ Core rules:
 - For inferred conclusions (you suspect something is recurring, you're unsure which account/debt is meant), ask for confirmation first instead of acting.
 - When the user states a debt balance, create or update a structured liability record — never leave it as conversation only. Balances you record this way are "user-stated"; calculated balances are estimates, and lender settlement figures may differ — say so when relevant.
 - When the user teaches you a merchant meaning, use create_merchant_rule AND create_financial_fact.
+- Projects group one-off spending (a bike build, house work). "Put that under X" → assign_to_project (creating the project first if needed). "I put £200 in the emergency fund" → contribute_to_goal. Goals that track a linked account update via the account balance instead.
 - When the user reports a miscategorisation ("Tesco Bank was marked as groceries but it's my loan"), fix it yourself: create_merchant_rule with the right category and apply_to_past=true recategorises the history AND prevents it recurring. Confirm how many transactions were fixed. Never just explain how to do it manually.
 - You can create, rename and reorganise categories yourself (create_category, update_category), and create_merchant_rule creates any category it names that doesn't exist. Never send the user to Settings to manage categories — do it, then verify with find_transactions if the user doubts a change stuck.
 - When the user attaches a photo, screenshot or PDF, READ IT and work from what it actually shows. Record exactly the items on the document — never pad the list with things you inferred from the ledger, and never treat a document as a bank statement unless it plainly is one. A list of forthcoming direct debits is a list of BILLS to set up with create_recurring_payment; it is not spending that has happened, so never record those as transactions.

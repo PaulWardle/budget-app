@@ -64,6 +64,10 @@ All money = bigint minor units. All private tables: `user_id` + RLS (= auth.uid(
       in AI context, auto-generated insights, commitments view, processor merchants
 - [x] **P3 Direction** — projects (one-off pots with budgets), savings goals UI
       (linked accounts, contributions, monthly-needed maths), monthly review page
+- [x] **P3.5 Pay periods** — the whole app runs payday-to-payday (weekend rule),
+      calendar-month fallback, AI answers framed around the next payday
+- [x] **P4 Ritual & foresight** — payday plan (allocate the period's money on
+      day one), ledger-driven bill price-rise detection, AI project/goal tools
 
 ## Deliberate v1 decisions (simplest reliable option, documented)
 

@@ -19,12 +19,17 @@ import {
   fetchBudget,
   fetchCategories,
   fetchProfile,
+  fetchRecurring,
+  fetchSavingsGoals,
   fetchTransactions,
   upsertBudgetLine,
 } from '@/lib/api'
 import { budgetSummary, categoryActuals, lineStatuses, type BudgetStatus } from '@/lib/engine/budget'
-import { daysBetween, isoAddDays, payPeriodFor } from '@/lib/engine/payperiod'
-import { money, monthLabel, todayIso } from '@/lib/format'
+import { expandRecurring } from '@/lib/engine/cashflow'
+import { everydayBaseline } from '@/lib/engine/forecast'
+import { daysBetween, isoAddDays, payPeriodFor, previousPayPeriods } from '@/lib/engine/payperiod'
+import { paydayPlan } from '@/lib/engine/plan'
+import { formatDateShort, money, monthLabel, todayIso } from '@/lib/format'
 import type { BudgetLineKind } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
@@ -79,6 +84,17 @@ export default function BudgetPage() {
     queryKey: ['transactions', 'range', period.start, monthEnd],
     queryFn: () => fetchTransactions({ from: period.start, to: monthEnd, limit: 1000 }),
   })
+  const { data: recurring } = useQuery({ queryKey: ['recurring'], queryFn: fetchRecurring })
+  const { data: goals } = useQuery({ queryKey: ['savings-goals'], queryFn: fetchSavingsGoals })
+  const historyFrom = (() => {
+    const d = new Date()
+    d.setMonth(d.getMonth() - 4)
+    return d.toISOString().slice(0, 10)
+  })()
+  const { data: history } = useQuery({
+    queryKey: ['transactions', 'history', historyFrom],
+    queryFn: () => fetchTransactions({ from: historyFrom, limit: 3000 }),
+  })
 
   const [addLine, setAddLine] = useState(false)
   const invalidate = () => qc.invalidateQueries({ queryKey: ['budget', month] })
@@ -131,6 +147,69 @@ export default function BudgetPage() {
     : []
   const summary = budget ? budgetSummary(budget.expected_income_minor, lines, actuals) : null
 
+  // ---- Payday plan (current period only): allocate the period's money on
+  // day one. The everyday pot must fund EVERYTHING that isn't a bill —
+  // including one-offs and project spend — so all non-bill spend counts here.
+  const isCurrentPeriod = today >= period.start && today <= period.end
+  const plan = (() => {
+    if (!isCurrentPeriod || !txns || !recurring) return null
+    const real = txns.filter((t) => !t.is_transfer && !t.exclude_from_budget && !t.is_reimbursable)
+    const incomeReceived = real.filter((t) => t.amount_minor > 0).reduce((s, t) => s + t.amount_minor, 0)
+    const billsPaid = real
+      .filter((t) => t.amount_minor < 0 && t.recurring_payment_id)
+      .reduce((s, t) => s + -t.amount_minor, 0)
+    const billsDue = recurring
+      .filter((r) => r.status === 'active')
+      .flatMap((r) =>
+        expandRecurring(
+          {
+            name: r.name,
+            amountMinor: r.amount_minor,
+            frequency: r.frequency,
+            nextDueDate: r.next_due_date,
+            intervalDays: r.interval_days,
+          },
+          today,
+          period.end,
+        ),
+      )
+      .filter((i) => i.date > today && i.amountMinor < 0)
+      .reduce((s, i) => s + -i.amountMinor, 0)
+    const everydaySpent = real
+      .filter((t) => t.amount_minor < 0 && !t.recurring_payment_id)
+      .reduce((s, t) => s + -t.amount_minor, 0)
+    const goalsPlanned = (goals ?? [])
+      .filter((g) => g.status === 'active')
+      .reduce((s, g) => s + (g.monthly_planned_minor ?? 0), 0)
+    const baseline = history
+      ? everydayBaseline(
+          history.map((t) => ({
+            date: t.date,
+            amountMinor: t.amount_minor,
+            categoryId: t.category_id,
+            isTransfer: t.is_transfer,
+            excludeFromBudget: t.exclude_from_budget,
+            isReimbursable: t.is_reimbursable,
+            recurringPaymentId: t.recurring_payment_id,
+            isOneOff: t.is_one_off,
+          })),
+          today,
+          3,
+          previousPayPeriods(today, paydayDay, 3),
+        )
+      : null
+    return paydayPlan({
+      incomeExpectedMinor: budget?.expected_income_minor ?? 0,
+      incomeReceivedMinor: incomeReceived,
+      billsPaidMinor: billsPaid,
+      billsDueMinor: billsDue,
+      goalsPlannedMinor: goalsPlanned,
+      everydaySpentMinor: everydaySpent,
+      daysRemaining: Math.max(0, daysInMonth - daysElapsed),
+      baselinePerDayMinor: baseline?.perDayMinor ?? 0,
+    })
+  })()
+
   return (
     <div>
       <PageHeader
@@ -148,6 +227,61 @@ export default function BudgetPage() {
           </div>
         }
       />
+
+      {plan && (
+        <Card className="mb-4">
+          <CardTitle>Payday plan — where this period's money goes</CardTitle>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">
+                Money in{plan.incomeIsExpected ? ' (expected)' : ''}
+              </p>
+              <p className="tnum text-base font-semibold">{money(plan.incomeMinor)}</p>
+            </div>
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">Bills & debts</p>
+              <p className="tnum text-base font-semibold">−{money(plan.billsTotalMinor)}</p>
+              <p className="text-[11px] text-ink-faint">paid + still due before payday</p>
+            </div>
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">Savings goals</p>
+              <p className="tnum text-base font-semibold">−{money(plan.goalsPlannedMinor)}</p>
+              <p className="text-[11px] text-ink-faint">
+                {plan.goalsPlannedMinor > 0 ? 'planned contributions' : 'no monthly amounts set on goals'}
+              </p>
+            </div>
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">Everyday pot</p>
+              <p className={`tnum text-base font-semibold ${plan.everydayPotMinor < 0 ? 'text-bad' : ''}`}>
+                {money(plan.everydayPotMinor)}
+              </p>
+              <p className="text-[11px] text-ink-faint">{money(plan.everydaySpentMinor)} spent so far</p>
+            </div>
+          </div>
+          {plan.shortfallMinor > 0 ? (
+            <p className="mt-3 rounded-lg bg-bad/10 px-3 py-2 text-sm text-bad">
+              Bills and planned savings exceed the money coming in by {money(plan.shortfallMinor)} —
+              something has to give before everyday spending starts.
+            </p>
+          ) : (
+            <div className="mt-3 rounded-lg bg-surface-2 px-3 py-2.5">
+              <p className="text-sm">
+                <strong className="tnum">{money(Math.max(0, plan.everydayLeftMinor))}</strong> left for
+                everyday spending — that's{' '}
+                <strong className="tnum">{money(Math.max(0, plan.perDayMinor))}/day</strong> until payday
+                on {formatDateShort(period.nextPayday)}.
+              </p>
+              {plan.baselinePerDayMinor > 0 && (
+                <p className={`mt-0.5 text-[11px] ${plan.perDayVsTypicalMinor < 0 ? 'text-warn' : 'text-ink-muted'}`}>
+                  {plan.perDayVsTypicalMinor >= 0
+                    ? `Comfortably above your typical ${money(plan.baselinePerDayMinor)}/day.`
+                    : `Tighter than your typical ${money(plan.baselinePerDayMinor)}/day — at your usual rate the pot runs out in ${plan.daysAtTypicalRate} days.`}
+                </p>
+              )}
+            </div>
+          )}
+        </Card>
+      )}
 
       {!budget ? (
         <Card className="space-y-3 p-6 text-center">

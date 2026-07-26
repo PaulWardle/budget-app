@@ -21,6 +21,7 @@ import {
   fetchRecurring,
   fetchTransactions,
   restoreRecurring,
+  syncBillPrices,
   upsertRecurring,
 } from '@/lib/api'
 import { detectRecurring, type RecurringCandidate } from '@/lib/engine/recurring'
@@ -29,7 +30,7 @@ import { supabase } from '@/lib/supabase'
 import type { Frequency, RecurringPayment } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 const FREQ_LABELS: Record<Frequency, string> = {
   weekly: 'Weekly',
@@ -66,6 +67,22 @@ export default function BillsPage() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['recurring'] })
   const invalidateDismissed = () => qc.invalidateQueries({ queryKey: ['dismissed-recurring'] })
+
+  // Learn real prices from the ledger once a day on arrival — a bill whose
+  // bank charge has settled at a new amount updates itself and shows in the
+  // price-changes card below. Fire-and-forget; never blocks the page.
+  useEffect(() => {
+    const key = 'bill-price-sync'
+    const today = new Date().toISOString().slice(0, 10)
+    if (localStorage.getItem(key) === today) return
+    localStorage.setItem(key, today)
+    void syncBillPrices(userId)
+      .then((n) => {
+        if (n > 0) invalidate()
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId])
 
   const candidates = useMemo(() => {
     if (!txns || !recurring) return []

@@ -5,6 +5,7 @@ import { todayIso } from '@/lib/format'
 import { computeNetWorth, type NetWorthItem } from '@/lib/engine/networth'
 import { ruleMatches, type MatchType } from '@/lib/engine/rules'
 import { detectRecurring, normaliseDescription } from '@/lib/engine/recurring'
+import { detectPriceChange } from '@/lib/engine/pricerise'
 import {
   LIABILITY_ACCOUNT_TYPES,
   LIQUID_ACCOUNT_TYPES,
@@ -732,6 +733,66 @@ export async function upsertLiability(
  * liability's stated balance date reduce it, so a user-stated balance stays
  * the source of truth for everything before it.
  */
+/**
+ * Learn each bill's real price from its matched transactions. Manual edits
+ * aside, price rises arrive as bank charges — when a bill's recent payments
+ * settle at a different amount, update the stored amount and append to
+ * price_history (which drives the Bills "price changes" card and the
+ * subscription_change insight). Returns how many bills were updated.
+ */
+export async function syncBillPrices(userId: string): Promise<number> {
+  const from = new Date()
+  from.setMonth(from.getMonth() - 8)
+  const [{ data: rps }, { data: txns }] = await Promise.all([
+    supabase
+      .from('recurring_payments')
+      .select('id,name,amount_minor,price_history,status')
+      .eq('status', 'active')
+      .lt('amount_minor', 0),
+    supabase
+      .from('transactions')
+      .select('date,amount_minor,recurring_payment_id')
+      .not('recurring_payment_id', 'is', null)
+      .gte('date', from.toISOString().slice(0, 10)),
+  ])
+  const byBill = new Map<string, { date: string; amountMinor: number }[]>()
+  for (const t of (txns ?? []) as { date: string; amount_minor: number; recurring_payment_id: string }[]) {
+    byBill.set(t.recurring_payment_id, [
+      ...(byBill.get(t.recurring_payment_id) ?? []),
+      { date: t.date, amountMinor: t.amount_minor },
+    ])
+  }
+  let updated = 0
+  for (const r of (rps ?? []) as Pick<RecurringPayment, 'id' | 'name' | 'amount_minor' | 'price_history'>[]) {
+    const change = detectPriceChange(r.amount_minor, byBill.get(r.id) ?? [])
+    if (!change) continue
+    const newAmount = -change.toMinor
+    const history = r.price_history ?? []
+    if (history.at(-1)?.amount_minor === newAmount) continue
+    const priceHistory = [
+      // Seed the old price so the first detected change still shows a from → to.
+      ...(history.length === 0 ? [{ date: change.since, amount_minor: r.amount_minor }] : history),
+      { date: change.since, amount_minor: newAmount },
+    ]
+    const { error } = await supabase
+      .from('recurring_payments')
+      .update({ amount_minor: newAmount, price_history: priceHistory })
+      .eq('id', r.id)
+    if (error) continue
+    await recordAudit({
+      userId,
+      recordType: 'recurring_payment',
+      recordId: r.id,
+      action: 'update',
+      previous: { amount_minor: r.amount_minor },
+      next: { amount_minor: newAmount, detected_from: 'ledger', since: change.since },
+      undoable: false,
+    })
+    updated += 1
+  }
+  return updated
+}
+
 export async function syncDebtLinks(userId: string): Promise<number> {
   const { data: rps } = await supabase
     .from('recurring_payments')
