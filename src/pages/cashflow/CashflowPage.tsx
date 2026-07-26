@@ -2,7 +2,8 @@ import { chartAxis, dateTooltipLabel, gridStroke, tooltipStyle } from '@/compone
 import { PageHeader, Stat } from '@/components/shared/common'
 import { Badge, Card, CardTitle, Select, Spinner } from '@/components/ui/primitives'
 import { BaselineInspector } from '@/components/shared/BaselineInspector'
-import { fetchAccounts, fetchCategories, fetchRecurring, fetchTransactions } from '@/lib/api'
+import { fetchAccounts, fetchCategories, fetchProfile, fetchRecurring, fetchTransactions } from '@/lib/api'
+import { daysBetween, payPeriodFor, previousPayPeriods } from '@/lib/engine/payperiod'
 import type { Transaction } from '@/types/domain'
 import {
   expandRecurring,
@@ -13,7 +14,7 @@ import {
 import { categoryActuals } from '@/lib/engine/budget'
 import { everydayBaseline, forecastMonthEnd, typicalSpendItems } from '@/lib/engine/forecast'
 import { analyseOverdraft } from '@/lib/engine/overdraft'
-import { daysInMonthOf, formatDateShort, money, monthStartIso, todayIso } from '@/lib/format'
+import { formatDateShort, money, todayIso } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import {
@@ -28,31 +29,40 @@ import {
 
 export default function CashflowPage() {
   const today = todayIso()
-  const month = monthStartIso()
   const [includeTypical, setIncludeTypical] = useState(true)
   const [inspecting, setInspecting] = useState(false)
   const [horizon, setHorizon] = useState(30)
+  const { data: profile } = useQuery({ queryKey: ['profile'], queryFn: fetchProfile })
+  // The reporting window is the current pay period: what has happened since
+  // payday, and what has to happen before the next one.
+  const paydayDay = (profile?.payday_day as number | null) ?? null
+  const period = payPeriodFor(today, paydayDay)
+  const month = period.start
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: recurring } = useQuery({ queryKey: ['recurring'], queryFn: fetchRecurring })
   const { data: txns } = useQuery({
-    queryKey: ['transactions', 'month', month],
+    queryKey: ['transactions', 'period', month],
     queryFn: () => fetchTransactions({ from: month, limit: 1000 }),
   })
-  // Four months back so the baseline has three complete months to measure.
+  // Four months back so the baseline has three complete pay periods to measure.
   const historyFrom = isoMonthsAgo(4)
   const { data: history } = useQuery({
     queryKey: ['transactions', 'history', historyFrom],
     queryFn: () => fetchTransactions({ from: historyFrom, limit: 3000 }),
   })
 
-  if (!accounts || !recurring || !txns || !history || !categories) return <Spinner />
+  if (!accounts || !recurring || !txns || !history || !categories || profile === undefined)
+    return <Spinner />
 
   const opening = accounts
     .filter((a) => a.include_in_cashflow && ['current', 'cash', 'wallet'].includes(a.account_type))
     .reduce((s, a) => s + a.balance_minor, 0)
 
-  const end = isoPlus(today, horizon)
+  // Expand at least to the period end so "bills still due before payday" is
+  // never truncated by a short chart horizon.
+  const horizonEnd = isoPlus(today, horizon)
+  const end = horizonEnd > period.end ? horizonEnd : period.end
   const items: ProjectedItem[] = recurring
     .filter((r) => r.status === 'active')
     .flatMap((r) =>
@@ -71,7 +81,13 @@ export default function CashflowPage() {
     )
   // What everyday spending has actually been, projected forward. Without this
   // the line only falls on bill dates and reads far healthier than reality.
-  const baseline = everydayBaseline(history.map(toForecastTxn), today)
+  // Measured payday-to-payday over the last three complete periods.
+  const baseline = everydayBaseline(
+    history.map(toForecastTxn),
+    today,
+    3,
+    previousPayPeriods(today, paydayDay, 3),
+  )
   // Already-excluded one-offs, so they can be put back from the same place.
   const excludedOneOffs = history
     .filter((t) => t.is_one_off && t.amount_minor < 0 && !t.is_transfer)
@@ -104,16 +120,17 @@ export default function CashflowPage() {
         )
       : null
 
-  const monthEnd = `${month.slice(0, 8)}${String(daysInMonthOf(month)).padStart(2, '0')}`
+  const monthEnd = period.end
   const forecast = forecastMonthEnd({
     today,
     currentBalanceMinor: opening,
     monthTxns: txns.map(toForecastTxn),
     baseline,
     remainingScheduled: items.filter((i) => i.date > today && i.date <= monthEnd),
+    period,
   })
 
-  // Month to date actuals
+  // Period-to-date actuals
   const engineTxns = txns.map((t) => ({
     id: t.id,
     date: t.date,
@@ -146,11 +163,15 @@ export default function CashflowPage() {
     <div className="space-y-4">
       <PageHeader
         title="Cashflow"
-        sub="Where the month lands, based on your bills and how you actually spend"
+        sub={
+          paydayDay
+            ? `Pay period ${period.label} · next payday ${formatDateShort(period.nextPayday)}`
+            : 'Where the month lands, based on your bills and how you actually spend'
+        }
       />
 
       <Card>
-        <CardTitle>Where this month is heading</CardTitle>
+        <CardTitle>{paydayDay ? 'Where this pay period is heading' : 'Where this month is heading'}</CardTitle>
         {forecast.basis === 'none' ? (
           <p className="text-sm text-ink-muted">
             Not enough history yet to project everyday spending. Import a couple of months of
@@ -161,19 +182,22 @@ export default function CashflowPage() {
             <p className="text-sm">
               {forecast.basis === 'baseline' ? (
                 <>
-                  On your last {baseline.monthsUsed} month{baseline.monthsUsed === 1 ? '' : 's'} you
-                  typically spend <strong>{money(baseline.perMonthMinor)}</strong> a month on
+                  Over your last {baseline.monthsUsed} pay period{baseline.monthsUsed === 1 ? '' : 's'} you
+                  typically spend <strong>{money(baseline.perMonthMinor)}</strong> between paydays on
                   everyday things — roughly {money(baseline.perDayMinor)} a day.
                 </>
               ) : (
                 <>
-                  Working from this month's own pace of {money(Math.round(forecast.everydaySpentMinor / Math.max(1, forecast.dayOfMonth)))} a
-                  day, since there's no complete month of history yet.
+                  Working from this period's own pace of {money(Math.round(forecast.everydaySpentMinor / Math.max(1, forecast.dayOfMonth)))} a
+                  day, since there's no complete period of history yet.
                 </>
               )}{' '}
-              With {forecast.daysRemaining} day{forecast.daysRemaining === 1 ? '' : 's'} left and{' '}
-              {money(forecast.billsRemainingMinor)} of bills still due, you're tracking to spend{' '}
-              <strong>{money(forecast.forecastSpendMinor)}</strong> this month.
+              With {forecast.daysRemaining} day{forecast.daysRemaining === 1 ? '' : 's'} until payday
+              {forecast.billsRemainingMinor > 0 && (
+                <> and {money(forecast.billsRemainingMinor)} of bills still due</>
+              )}
+              , you're tracking to spend <strong>{money(forecast.forecastSpendMinor)}</strong> this{' '}
+              {paydayDay ? 'period' : 'month'}.
             </p>
             <p
               className={`mt-2 text-sm font-medium ${
@@ -182,11 +206,14 @@ export default function CashflowPage() {
             >
               {forecast.forecastEndBalanceMinor < 0 ? (
                 <>
-                  That leaves you about {money(forecast.forecastEndBalanceMinor)} at month end —{' '}
-                  {money(Math.abs(forecast.forecastEndBalanceMinor))} short.
+                  That leaves you about {money(forecast.forecastEndBalanceMinor)} when payday arrives
+                  on {formatDateShort(period.nextPayday)} — {money(Math.abs(forecast.forecastEndBalanceMinor))} short.
                 </>
               ) : (
-                <>That leaves about {money(forecast.forecastEndBalanceMinor)} at month end.</>
+                <>
+                  That leaves about {money(forecast.forecastEndBalanceMinor)} when payday arrives on{' '}
+                  {formatDateShort(period.nextPayday)}.
+                </>
               )}
             </p>
             <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -198,8 +225,8 @@ export default function CashflowPage() {
             {forecast.basis === 'baseline' && (
               <p className="mt-3 text-[11px] text-ink-faint">
                 Everyday spend excludes your bills, transfers and anything marked reimbursable.
-                Measured across {baseline.months.map((m) => money(m.totalMinor)).join(', ')} — the
-                middle month is used, so one unusual month doesn't skew it.{' '}
+                Measured across {baseline.months.map((m) => money(m.totalMinor)).join(', ')} in your
+                last pay periods — the middle value is used, so one unusual period doesn't skew it.{' '}
                 <button
                   type="button"
                   onClick={() => setInspecting(true)}
@@ -215,14 +242,14 @@ export default function CashflowPage() {
                   <span className="text-warn">
                     {' '}
                     You're running about {Math.round((forecast.paceRatio - 1) * 100)}% above that
-                    pace so far this month.
+                    pace so far this period.
                   </span>
                 )}
                 {forecast.paceRatio <= 0.75 && (
                   <span className="text-good">
                     {' '}
                     You're running about {Math.round((1 - forecast.paceRatio) * 100)}% below that
-                    pace so far this month.
+                    pace so far this period.
                   </span>
                 )}
               </p>
@@ -287,7 +314,7 @@ export default function CashflowPage() {
       )}
 
       <Card>
-        <CardTitle>This month so far</CardTitle>
+        <CardTitle>{paydayDay ? `This period so far (since ${formatDateShort(period.start)})` : 'This month so far'}</CardTitle>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           <Stat label="Opening cash (today)" value={money(opening)} />
           <Stat label="Income" value={money(income)} />
@@ -301,11 +328,16 @@ export default function CashflowPage() {
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="mb-0">Projected daily balance — next {horizon} days</CardTitle>
           <Select
-            className="w-28"
+            className="w-36"
             value={String(horizon)}
             onChange={(e) => setHorizon(Number(e.target.value))}
             aria-label="Projection horizon"
           >
+            {paydayDay && daysBetween(today, period.nextPayday) > 0 && (
+              <option value={String(daysBetween(today, period.nextPayday))}>
+                To payday ({daysBetween(today, period.nextPayday)}d)
+              </option>
+            )}
             <option value="30">30 days</option>
             <option value="60">60 days</option>
             <option value="90">90 days</option>
@@ -328,7 +360,7 @@ export default function CashflowPage() {
               {sts.negativeDays.length > 1 ? ` (and ${sts.negativeDays.length - 1} more days)` : ''}.
             </span>
           ) : (
-            <span className="text-good">Projected balance stays positive for the next 30 days.</span>
+            <span className="text-good">Projected balance stays positive for the next {horizon} days.</span>
           )}{' '}
           Lowest point: {money(sts.minProjectedBalanceMinor)}.{' '}
           {includeTypical && baseline.perDayMinor > 0 ? (

@@ -29,8 +29,15 @@ export interface ForecastTxn {
 }
 
 export interface BaselineMonth {
-  month: string // YYYY-MM
+  month: string // period key: YYYY-MM for calendar months, start date for pay periods
   totalMinor: Minor // positive
+}
+
+/** A measurement window for the baseline — a calendar month or a pay period. */
+export interface BaselineWindow {
+  start: string // inclusive
+  end: string // inclusive
+  days: number
 }
 
 export interface EverydayBaseline {
@@ -80,23 +87,36 @@ function isEveryday(t: ForecastTxn): boolean {
 }
 
 /**
- * Typical everyday spend per month, measured over recent **complete** months.
- * The current month is excluded because a part-month total would drag the
+ * Typical everyday spend per month, measured over recent **complete** windows.
+ * By default those are calendar months before the current one; pass `windows`
+ * (e.g. the last three complete pay periods) to measure payday-to-payday
+ * instead. Part-complete windows are excluded because they would drag the
  * baseline down for no reason.
  */
 export function everydayBaseline(
   txns: ForecastTxn[],
   today: string,
   monthsBack = 3,
+  windows?: BaselineWindow[],
 ): EverydayBaseline {
   const currentMonth = monthOf(today)
+  // Key a date to its measurement window; null = outside every window.
+  const keyOf = windows
+    ? (date: string): string | null => {
+        const w = windows.find((x) => date >= x.start && date <= x.end)
+        return w ? w.start : null
+      }
+    : (date: string): string | null => {
+        const m = monthOf(date)
+        return m >= currentMonth ? null : m
+      }
   const totals = new Map<string, number>()
   const catTotals = new Map<string | null, Map<string, number>>()
 
   for (const t of txns) {
     if (!isEveryday(t)) continue
-    const m = monthOf(t.date)
-    if (m >= currentMonth) continue // complete months only
+    const m = keyOf(t.date)
+    if (m === null) continue
     totals.set(m, (totals.get(m) ?? 0) + -t.amountMinor)
     const perCat = catTotals.get(t.categoryId) ?? new Map<string, number>()
     perCat.set(m, (perCat.get(m) ?? 0) + -t.amountMinor)
@@ -124,8 +144,10 @@ export function everydayBaseline(
 
   const values = months.map((m) => m.totalMinor)
   const perMonthMinor = median(values)
-  const averageDays =
-    months.reduce((s, m) => s + daysInMonth(m.month), 0) / months.length
+  const averageDays = windows
+    ? months.reduce((s, m) => s + (windows.find((w) => w.start === m.month)?.days ?? 30), 0) /
+      months.length
+    : months.reduce((s, m) => s + daysInMonth(m.month), 0) / months.length
   const keep = new Set(months.map((m) => m.month))
 
   const byCategory = [...catTotals.entries()]
@@ -148,7 +170,10 @@ export function everydayBaseline(
     byCategory,
     confidence: months.length >= 3 ? 'high' : months.length === 2 ? 'medium' : 'low',
     contributors: txns
-      .filter((t) => isEveryday(t) && keep.has(monthOf(t.date)))
+      .filter((t) => {
+        const k = isEveryday(t) ? keyOf(t.date) : null
+        return k !== null && keep.has(k)
+      })
       .sort((a, b) => a.amountMinor - b.amountMinor),
   }
 }
@@ -179,10 +204,14 @@ export interface MonthEndForecast {
 }
 
 /**
- * Where the month is heading: actuals so far, plus expected everyday spending
+ * Where the period is heading: actuals so far, plus expected everyday spending
  * for the days remaining, plus bills still scheduled.
  *
- * Falls back to this month's own run-rate when there is no history to measure
+ * By default the period is the calendar month containing `today`; pass
+ * `period` to forecast a pay period (payday to day-before-next-payday)
+ * instead — `monthTxns` should then contain the period's transactions.
+ *
+ * Falls back to the period's own run-rate when there is no history to measure
  * against, and reports `basis: 'none'` when there is neither.
  */
 export function forecastMonthEnd(input: {
@@ -190,13 +219,17 @@ export function forecastMonthEnd(input: {
   currentBalanceMinor: Minor
   monthTxns: ForecastTxn[]
   baseline: EverydayBaseline
-  /** Remaining scheduled items between tomorrow and month end. */
+  /** Remaining scheduled items between tomorrow and the period end. */
   remainingScheduled: ProjectedItem[]
+  /** Pay period to forecast over instead of the calendar month. */
+  period?: { start: string; end: string; days: number }
 }): MonthEndForecast {
-  const { today, currentBalanceMinor, monthTxns, baseline, remainingScheduled } = input
-  const month = monthOf(today)
-  const dim = daysInMonth(month)
-  const dayOfMonth = Number(today.slice(8, 10))
+  const { today, currentBalanceMinor, monthTxns, baseline, remainingScheduled, period } = input
+  const month = period ? period.start : monthOf(today)
+  const dim = period ? period.days : daysInMonth(monthOf(today))
+  const dayOfMonth = period
+    ? Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${period.start}T00:00:00Z`)) / 86_400_000) + 1
+    : Number(today.slice(8, 10))
   const daysRemaining = Math.max(0, dim - dayOfMonth)
 
   let everydaySpentMinor = 0

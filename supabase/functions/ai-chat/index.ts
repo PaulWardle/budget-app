@@ -951,27 +951,58 @@ async function executeAction(
   }
 }
 
+// ----------------------------------------------------------- pay periods
+// The user's real month runs payday to payday (profiles.payday_day, rolled
+// back to the Friday before when it lands on a weekend). Mirrors
+// src/lib/engine/payperiod.ts.
+function actualPayday(year: number, month1: number, paydayDay: number): string {
+  const dim = new Date(Date.UTC(year, month1, 0)).getUTCDate()
+  const d = new Date(Date.UTC(year, month1 - 1, Math.min(paydayDay, dim)))
+  const dow = d.getUTCDay()
+  if (dow === 6) d.setUTCDate(d.getUTCDate() - 1)
+  else if (dow === 0) d.setUTCDate(d.getUTCDate() - 2)
+  return d.toISOString().slice(0, 10)
+}
+
+function payPeriodFor(dateIso: string, paydayDay: number | null): { start: string; end: string; nextPayday: string; days: number } {
+  if (!paydayDay) {
+    const y = Number(dateIso.slice(0, 4))
+    const m = Number(dateIso.slice(5, 7))
+    const start = `${dateIso.slice(0, 7)}-01`
+    const next = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`
+    const end = new Date(Date.parse(`${next}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10)
+    return { start, end, nextPayday: next, days: Math.round((Date.parse(next) - Date.parse(start)) / 86_400_000) }
+  }
+  const y = Number(dateIso.slice(0, 4))
+  const m = Number(dateIso.slice(5, 7))
+  const candidates: string[] = []
+  for (const delta of [-2, -1, 0, 1]) {
+    const total = y * 12 + (m - 1) + delta
+    candidates.push(actualPayday(Math.floor(total / 12), (total % 12) + 1, paydayDay))
+  }
+  const start = candidates.filter((c) => c <= dateIso).sort().pop()!
+  const nextPayday = candidates.find((c) => c > start)!
+  const end = new Date(Date.parse(`${nextPayday}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10)
+  return { start, end, nextPayday, days: Math.round((Date.parse(nextPayday) - Date.parse(start)) / 86_400_000) }
+}
+
 // --------------------------------------------------------------- context
 async function buildContext(ctx: AuthedContext): Promise<string> {
   const { supabase } = ctx
   const today = new Date().toISOString().slice(0, 10)
-  const month = today.slice(0, 7)
-  const monthStart = `${month}-01`
-  const daysInMonth = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate()
-  const monthEnd = `${month}-${String(daysInMonth).padStart(2, '0')}`
   const historyFrom = (() => {
     const d = new Date()
     return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 4, 1)).toISOString().slice(0, 10)
   })()
 
-  const [accounts, categories, liabilities, recurring, facts, goals, budget, nwSnap, history] = await Promise.all([
+  const [accounts, categories, liabilities, recurring, facts, goals, profileRow, nwSnap, history] = await Promise.all([
     supabase.from('accounts').select('id,name,provider,account_type,balance_minor,balance_updated_at').is('archived_at', null),
     supabase.from('categories').select('id,name,parent_id').eq('is_archived', false),
     supabase.from('liabilities').select('id,name,provider,liability_type,current_balance_minor,apr,monthly_payment_minor,balance_source,balance_effective_date').neq('status', 'archived'),
     supabase.from('recurring_payments').select('id,name,kind,amount_minor,frequency,next_due_date,status,is_essential,liability_id'),
     supabase.from('financial_facts').select('fact_type,fact_key,value,confidence').eq('is_active', true).limit(50),
     supabase.from('savings_goals').select('id,name,target_minor,current_minor').neq('status', 'archived'),
-    supabase.from('budgets').select('*, budget_lines(*)').eq('month', monthStart).maybeSingle(),
+    supabase.from('profiles').select('payday_day').maybeSingle(),
     supabase.from('net_worth_snapshots').select('date,assets_minor,liabilities_minor,net_worth_minor').order('date', { ascending: false }).limit(1).maybeSingle(),
     supabase
       .from('transactions')
@@ -979,6 +1010,13 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
       .gte('date', historyFrom)
       .limit(6000),
   ])
+
+  const paydayDay = ((profileRow.data as { payday_day: number | null } | null)?.payday_day) ?? null
+  const period = payPeriodFor(today, paydayDay)
+  // The budget row is keyed to the month the period pays for (period ending
+  // 24 Aug → the August budget).
+  const budgetMonth = `${period.end.slice(0, 7)}-01`
+  const budget = await supabase.from('budgets').select('*, budget_lines(*)').eq('month', budgetMonth).maybeSingle()
 
   const cats = (categories.data ?? []) as { id: string; name: string; parent_id: string | null }[]
   const catLines = cats
@@ -989,10 +1027,10 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
     })
     .join('\n')
 
-  // ---- Engine-computed month position + forecast (deterministic, same
+  // ---- Engine-computed pay-period position + forecast (deterministic, same
   // definitions as the app: everyday spend excludes transfers, bills,
   // reimbursable, excluded and one-off rows; baseline = median of the last
-  // three COMPLETE months).
+  // three COMPLETE pay periods).
   type H = {
     account_id: string; date: string; amount_minor: number; is_transfer: boolean
     exclude_from_budget: boolean; is_reimbursable: boolean
@@ -1003,31 +1041,36 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
   const isEveryday = (t: H) =>
     t.amount_minor < 0 && !t.is_transfer && !t.exclude_from_budget && !t.is_reimbursable &&
     !t.recurring_payment_id && !t.is_one_off
-  const everydayByMonth = new Map<string, number>()
-  for (const t of hist) {
-    if (!isEveryday(t) || t.date >= monthStart) continue
-    const m = t.date.slice(0, 7)
-    everydayByMonth.set(m, (everydayByMonth.get(m) ?? 0) + -t.amount_minor)
+  // Prior three complete pay periods, walked back from the current one.
+  const priorPeriods: { start: string; end: string; days: number }[] = []
+  let cursor = period
+  for (let i = 0; i < 3; i++) {
+    const prevEnd = new Date(Date.parse(`${cursor.start}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10)
+    cursor = payPeriodFor(prevEnd, paydayDay)
+    priorPeriods.push(cursor)
   }
-  const monthTotals = [...everydayByMonth.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-3).map(([, v]) => v)
-  const sortedTotals = [...monthTotals].sort((a, b) => a - b)
-  const baselineMonthMinor = sortedTotals.length === 0 ? 0
+  const periodTotals = priorPeriods
+    .map((p) => hist.filter((t) => isEveryday(t) && t.date >= p.start && t.date <= p.end).reduce((s, t) => s + -t.amount_minor, 0))
+    .filter((v) => v > 0)
+  const sortedTotals = [...periodTotals].sort((a, b) => a - b)
+  const baselinePeriodMinor = sortedTotals.length === 0 ? 0
     : sortedTotals.length % 2 === 1 ? sortedTotals[Math.floor(sortedTotals.length / 2)]
     : Math.round((sortedTotals[sortedTotals.length / 2 - 1] + sortedTotals[sortedTotals.length / 2]) / 2)
-  const baselinePerDay = Math.round(baselineMonthMinor / 30.44)
+  const avgPriorDays = priorPeriods.reduce((s, p) => s + p.days, 0) / Math.max(1, priorPeriods.length)
+  const baselinePerDay = Math.round(baselinePeriodMinor / Math.max(1, avgPriorDays))
 
-  let incomeMonth = 0, everydayMonth = 0, billsMonth = 0
+  let incomePeriod = 0, everydayPeriod = 0, billsPeriod = 0
   for (const t of hist) {
-    if (t.date < monthStart || t.is_transfer || t.exclude_from_budget || t.is_reimbursable) continue
-    if (t.amount_minor > 0) incomeMonth += t.amount_minor
-    else if (t.recurring_payment_id) billsMonth += -t.amount_minor
-    else everydayMonth += -t.amount_minor
+    if (t.date < period.start || t.is_transfer || t.exclude_from_budget || t.is_reimbursable) continue
+    if (t.amount_minor > 0) incomePeriod += t.amount_minor
+    else if (t.recurring_payment_id) billsPeriod += -t.amount_minor
+    else everydayPeriod += -t.amount_minor
   }
-  const dayOfMonth = Number(today.slice(8, 10))
-  const daysRemaining = daysInMonth - dayOfMonth
+  const dayOfPeriod = Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${period.start}T00:00:00Z`)) / 86_400_000) + 1
+  const daysRemaining = Math.max(0, period.days - dayOfPeriod)
   const rps = (recurring.data ?? []) as { name: string; kind: string; amount_minor: number; frequency: string; next_due_date: string; status: string; is_essential: boolean }[]
   const billsRemaining = rps
-    .filter((r) => r.status === 'active' && r.amount_minor < 0 && r.next_due_date > today && r.next_due_date <= monthEnd)
+    .filter((r) => r.status === 'active' && r.amount_minor < 0 && r.next_due_date > today && r.next_due_date <= period.end)
     .reduce((s, r) => s + -r.amount_minor, 0)
   const cash = ((accounts.data ?? []) as { account_type: string; balance_minor: number }[])
     .filter((a) => ['current', 'cash', 'wallet'].includes(a.account_type))
@@ -1043,9 +1086,9 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
     byAccount.set(t.account_id, [...(byAccount.get(t.account_id) ?? []), t])
   }
   const odTxns = [...byAccount.values()].sort((a, b) => b.length - a.length)[0] ?? []
-  const odThisMonth = odTxns.filter((t) => t.date >= monthStart)
-  const overdrawnNow = odThisMonth.length > 0 &&
-    odThisMonth.sort((a, b) => a.date.localeCompare(b.date))[odThisMonth.length - 1].running_balance_minor! < 0
+  const odThisPeriod = odTxns.filter((t) => t.date >= period.start)
+  const overdrawnNow = odThisPeriod.length > 0 &&
+    odThisPeriod.sort((a, b) => a.date.localeCompare(b.date))[odThisPeriod.length - 1].running_balance_minor! < 0
   const odInterestYtd = hist
     .filter((t) => t.amount_minor < 0 && /\bOD\s*INT|OVERDRAFT\s*INT/i.test(t.description))
     .reduce((s, t) => s + -t.amount_minor, 0)
@@ -1069,9 +1112,9 @@ async function buildContext(ctx: AuthedContext): Promise<string> {
     `\nNET WORTH (latest snapshot): ${JSON.stringify(nwSnap.data ?? null)}`,
     `\nRECURRING PAYMENTS:\n${JSON.stringify(recurring.data ?? [], null, 0)}`,
     `\nCOMMITMENTS SUMMARY: total ~${Math.round(commitTotal)} minor/month across ${activeOut.length} active outgoings; non-essential (cuttable) ~${Math.round(cuttableTotal)} minor/month: ${cuttable.map((r) => r.name).join(', ') || 'none marked'}`,
-    `\nMONTH POSITION (engine-computed, day ${dayOfMonth} of ${daysInMonth}): income received ${incomeMonth}; bills paid ${billsMonth}; everyday spend so far ${everydayMonth}; bills still due before month end ${billsRemaining}; typical everyday spend ${baselineMonthMinor}/month (~${baselinePerDay}/day, median of last ${monthTotals.length} complete months); cash across current accounts ${cash}; PROJECTED month-end cash ${projectedEnd} (cash − remaining everyday at typical rate − bills still due). Use these for affordability, "will I run short", and pace questions — do not recompute from partial data.`,
+    `\nPAY PERIOD POSITION (engine-computed; the user's "month" runs PAYDAY TO PAYDAY — nominal payday day ${paydayDay ?? 'not set, calendar month used'}, rolled to the Friday before when it falls on a weekend): current period ${period.start} to ${period.end}, day ${dayOfPeriod} of ${period.days}; NEXT PAYDAY ${period.nextPayday}; income received this period ${incomePeriod}; bills paid ${billsPeriod}; everyday spend so far ${everydayPeriod}; bills still due before payday ${billsRemaining}; typical everyday spend ${baselinePeriodMinor}/period (~${baselinePerDay}/day, median of last ${periodTotals.length} complete pay periods); cash across current accounts ${cash}; PROJECTED cash at next payday ${projectedEnd} (cash − remaining everyday at typical rate − bills still due). Use these for affordability, "will I run short before payday", and pace questions — do not recompute from partial data, and never frame answers around the calendar month end.`,
     `\nOVERDRAFT: currently ${overdrawnNow ? 'BELOW zero' : 'above zero'} on the main current account; overdraft interest paid since ${historyFrom}: ${odInterestYtd} minor.`,
-    `\nBUDGET THIS MONTH: ${b ? JSON.stringify({ expected_income_minor: b.expected_income_minor, lines: b.budget_lines }) : 'none set'}`,
+    `\nBUDGET THIS PERIOD (stored as the ${budgetMonth.slice(0, 7)} budget): ${b ? JSON.stringify({ expected_income_minor: b.expected_income_minor, lines: b.budget_lines }) : 'none set'}`,
     `\nSAVINGS GOALS:\n${JSON.stringify(goals.data ?? [], null, 0)}`,
     `\nREMEMBERED FACTS:\n${JSON.stringify(facts.data ?? [], null, 0)}`,
     `\nCATEGORIES (name (uuid)):\n${catLines}`,
@@ -1092,7 +1135,7 @@ Core rules:
 - Only propose a recurring payment when the user asked for it or the evidence is strong (a document that lists it, or a clear repeating pattern). One-off or variable card payments to a company are not a direct debit. When unsure, ask — do not list speculative bills as if they were facts.
 - When an amount is mentioned without currency, assume GBP.
 - Transfers between the user's own accounts are not spending.
-- The MONTH POSITION, NET WORTH, OVERDRAFT and COMMITMENTS blocks in your context are engine-computed over the full ledger. Use them directly for affordability questions ("can I afford X?", "will I run short before payday?", "what's my net worth?") instead of estimating. find_transactions aggregates (totals, counts, monthly breakdown) cover EVERY matching row even when the detail list is shorter — quote the aggregates. If its result carries a warning, repeat that caveat.
+- The user's financial month runs PAYDAY TO PAYDAY, not 1st to 31st. The PAY PERIOD POSITION, NET WORTH, OVERDRAFT and COMMITMENTS blocks in your context are engine-computed over the full ledger. Use them directly for affordability questions ("can I afford X?", "will I run short before payday?", "what's my net worth?") instead of estimating, and always talk in terms of the next payday, never the calendar month end. find_transactions aggregates (totals, counts, monthly breakdown) cover EVERY matching row even when the detail list is shorter — quote the aggregates. If its result carries a warning, repeat that caveat.
 - A debt whose balance_source is "estimated" with balance 0 has not had its real balance entered yet — say so when it affects an answer, and suggest setting the balance or uploading the agreement.
 - You give factual information and options with their maths — never a personal recommendation of a specific financial product, and never individualised instructions to settle a specific credit agreement. If arrears or unaffordable debt come up, mention that free guidance exists (MoneyHelper, StepChange).
 - Be concise and factual. Use British English and £. Never moralise about ordinary spending — deliberate spending on things the user values is a choice, not a failure. The only spending concern worth raising is funding: whether it deepens the overdraft or is covered.

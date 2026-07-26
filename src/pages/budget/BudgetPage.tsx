@@ -18,11 +18,13 @@ import {
   deleteBudgetLine,
   fetchBudget,
   fetchCategories,
+  fetchProfile,
   fetchTransactions,
   upsertBudgetLine,
 } from '@/lib/api'
 import { budgetSummary, categoryActuals, lineStatuses, type BudgetStatus } from '@/lib/engine/budget'
-import { daysInMonthOf, money, monthLabel, monthStartIso, todayIso } from '@/lib/format'
+import { daysBetween, isoAddDays, payPeriodFor } from '@/lib/engine/payperiod'
+import { money, monthLabel, todayIso } from '@/lib/format'
 import type { BudgetLineKind } from '@/types/domain'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
@@ -56,17 +58,26 @@ const statusTone: Record<BudgetStatus, 'good' | 'warn' | 'bad'> = {
 export default function BudgetPage() {
   const userId = useUserId()
   const qc = useQueryClient()
-  const [month, setMonth] = useState(monthStartIso())
-  const monthEnd = `${month.slice(0, 8)}${String(daysInMonthOf(month)).padStart(2, '0')}`
+  const today = todayIso()
+  // Budgets run payday to payday. A period is identified by any date inside
+  // it; the stored budget row is keyed to the month the period pays for
+  // (period 24 Jul – 24 Aug → the August budget).
+  const [anchor, setAnchor] = useState(today)
+  const { data: profile } = useQuery({ queryKey: ['profile'], queryFn: fetchProfile })
+  const paydayDay = (profile?.payday_day as number | null) ?? null
+  const period = payPeriodFor(anchor, paydayDay)
+  const month = period.budgetMonth
+  const monthEnd = period.end
 
   const { data: budget, isLoading } = useQuery({
     queryKey: ['budget', month],
     queryFn: () => fetchBudget(month),
+    enabled: profile !== undefined,
   })
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
   const { data: txns } = useQuery({
-    queryKey: ['transactions', 'range', month, monthEnd],
-    queryFn: () => fetchTransactions({ from: month, to: monthEnd, limit: 1000 }),
+    queryKey: ['transactions', 'range', period.start, monthEnd],
+    queryFn: () => fetchTransactions({ from: period.start, to: monthEnd, limit: 1000 }),
   })
 
   const [addLine, setAddLine] = useState(false)
@@ -88,16 +99,11 @@ export default function BudgetPage() {
     onSuccess: invalidate,
   })
 
-  if (isLoading || !categories) return <Spinner />
+  if (isLoading || !categories || profile === undefined) return <Spinner />
 
-  const today = todayIso()
-  const isCurrentMonth = month === monthStartIso()
-  const daysInMonth = daysInMonthOf(month)
-  const daysElapsed = isCurrentMonth
-    ? Number(today.slice(8, 10))
-    : month < monthStartIso()
-      ? daysInMonth
-      : 0
+  const daysInMonth = period.days
+  const daysElapsed =
+    today > period.end ? daysInMonth : today < period.start ? 0 : daysBetween(period.start, today) + 1
 
   const engineTxns = (txns ?? []).map((t) => ({
     id: t.id,
@@ -129,13 +135,14 @@ export default function BudgetPage() {
     <div>
       <PageHeader
         title="Budget"
+        sub={paydayDay ? `Pay period ${period.label} — payday to payday` : undefined}
         actions={
           <div className="flex items-center gap-1">
-            <Button variant="ghost" size="icon" onClick={() => setMonth(shiftMonth(month, -1))} aria-label="Previous month">
+            <Button variant="ghost" size="icon" onClick={() => setAnchor(isoAddDays(period.start, -1))} aria-label="Previous period">
               <ChevronLeft className="h-4 w-4" />
             </Button>
             <span className="w-32 text-center text-sm font-semibold">{monthLabel(month)}</span>
-            <Button variant="ghost" size="icon" onClick={() => setMonth(shiftMonth(month, 1))} aria-label="Next month">
+            <Button variant="ghost" size="icon" onClick={() => setAnchor(period.nextPayday)} aria-label="Next period">
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
@@ -183,11 +190,11 @@ export default function BudgetPage() {
                   <p className="text-[11px] text-ink-faint">income in: {money(summary.actualIncomeMinor)}</p>
                 </div>
                 <div>
-                  <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">Forecast month-end</p>
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">{paydayDay ? 'Forecast by payday' : 'Forecast month-end'}</p>
                   <p className={`tnum text-base font-semibold ${summary.forecastSpendMinor > summary.plannedSpendMinor ? 'text-warn' : ''}`}>
                     {money(summary.forecastSpendMinor)}
                   </p>
-                  <p className="text-[11px] text-ink-faint" title="Variable categories: spend so far ÷ days elapsed × days in month. Fixed, debt and savings: the larger of planned or actual.">
+                  <p className="text-[11px] text-ink-faint" title="Variable categories: spend so far ÷ days elapsed × days in the period. Fixed, debt and savings: the larger of planned or actual.">
                     run-rate + commitments ⓘ
                   </p>
                 </div>
@@ -254,7 +261,7 @@ export default function BudgetPage() {
                         <div key={l.id}>
                           <div className="mb-1 flex items-center justify-between gap-2">
                             <Link
-                              to={`/transactions?category=${l.category_id ?? ''}&from=${month}&to=${monthEnd}`}
+                              to={`/transactions?category=${l.category_id ?? ''}&from=${period.start}&to=${monthEnd}`}
                               className="truncate text-sm font-medium hover:text-accent"
                             >
                               {label}

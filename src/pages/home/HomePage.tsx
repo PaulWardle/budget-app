@@ -9,13 +9,15 @@ import {
   fetchCategories,
   fetchInsights,
   fetchLiabilities,
+  fetchProfile,
   fetchRecurring,
   fetchTransactions,
 } from '@/lib/api'
+import { payPeriodFor, previousPayPeriods } from '@/lib/engine/payperiod'
 import { categoryActuals, budgetSummary, lineStatuses } from '@/lib/engine/budget'
 import { expandRecurring, projectDailyBalances, safeToSpend, type ProjectedItem } from '@/lib/engine/cashflow'
 import { computeNetWorth } from '@/lib/engine/networth'
-import { daysInMonthOf, formatDateShort, formatDateTime, money, monthStartIso, todayIso } from '@/lib/format'
+import { formatDateShort, formatDateTime, money, todayIso } from '@/lib/format'
 import { DrillDown, type DrillRow } from '@/components/shared/drilldown'
 import { everydayBaseline, forecastMonthEnd } from '@/lib/engine/forecast'
 import { LIQUID_ACCOUNT_TYPES } from '@/types/domain'
@@ -36,16 +38,25 @@ type Drill = {
 
 export default function HomePage() {
   const userId = useUserId()
-  const month = monthStartIso()
   const today = todayIso()
   const [drill, setDrill] = useState<Drill | null>(null)
+  const { data: profile } = useQuery({ queryKey: ['profile'], queryFn: fetchProfile })
+  // Everything below runs payday-to-payday: the "month" is the current pay
+  // period (payday rolls back to Friday when it lands on a weekend), so
+  // "what's left" means left until the next payday, not until the 31st.
+  const paydayDay = (profile?.payday_day as number | null) ?? null
+  const period = payPeriodFor(today, paydayDay)
+  const month = period.start
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: liabilities } = useQuery({ queryKey: ['liabilities'], queryFn: fetchLiabilities })
   const { data: txns } = useQuery({
-    queryKey: ['transactions', 'month', month],
+    queryKey: ['transactions', 'period', month],
     queryFn: () => fetchTransactions({ from: month, limit: 1000 }),
   })
-  const { data: budget } = useQuery({ queryKey: ['budget', month], queryFn: () => fetchBudget(month) })
+  const { data: budget } = useQuery({
+    queryKey: ['budget', period.budgetMonth],
+    queryFn: () => fetchBudget(period.budgetMonth),
+  })
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
   const { data: recurring } = useQuery({ queryKey: ['recurring'], queryFn: fetchRecurring })
   const { data: insights } = useQuery({ queryKey: ['insights'], queryFn: () => fetchInsights() })
@@ -82,7 +93,7 @@ export default function HomePage() {
       .catch(() => {})
   }, [history, categories, recurring, accounts, userId, qc])
 
-  if (!accounts || !liabilities || !txns || !categories || !recurring) {
+  if (!accounts || !liabilities || !txns || !categories || !recurring || profile === undefined) {
     return (
       <div className="flex justify-center pt-20">
         <Spinner className="h-6 w-6" />
@@ -121,8 +132,8 @@ export default function HomePage() {
     incomeReceived += a.incomeMinor
     spendingToDate += a.spentMinor
   }
-  const dayOfMonth = Number(today.slice(8, 10))
-  const daysInMonth = daysInMonthOf(month)
+  const dayOfMonth = Math.max(1, Math.round((Date.parse(today) - Date.parse(period.start)) / 86_400_000) + 1)
+  const daysInMonth = period.days
 
   // The exact rows the figures above were summed from — same exclusions as the
   // engine (transfers, budget-excluded and reimbursable rows are left out), and
@@ -197,10 +208,12 @@ export default function HomePage() {
   }
   const donutColors = assignColors(donutTop.map((d) => d.name), dark)
 
-  // ---- Upcoming commitments (30 days) ----
+  // ---- Upcoming commitments (30 days, extended to the period end so a long
+  // pay period never truncates "bills still due before payday") ----
   const in30 = new Date()
   in30.setDate(in30.getDate() + 30)
-  const to = in30.toISOString().slice(0, 10)
+  const to30 = in30.toISOString().slice(0, 10)
+  const to = to30 > period.end ? to30 : period.end
   const active = recurring.filter((r) => r.status === 'active')
   const upcoming: ProjectedItem[] = active
     .flatMap((r) =>
@@ -234,18 +247,26 @@ export default function HomePage() {
     recurringPaymentId: t.recurring_payment_id,
     isOneOff: t.is_one_off,
   })
-  const baseline = everydayBaseline((history ?? []).map(toForecastTxn), today)
-  const monthEndIso = `${month.slice(0, 8)}${String(daysInMonth).padStart(2, '0')}`
+  // Baseline measured over the last three complete pay periods, so "typical"
+  // means typical between paydays.
+  const baseline = everydayBaseline(
+    (history ?? []).map(toForecastTxn),
+    today,
+    3,
+    previousPayPeriods(today, paydayDay, 3),
+  )
+  const monthEndIso = period.end
   const forecast = forecastMonthEnd({
     today,
     currentBalanceMinor: cash,
     monthTxns: txns.map(toForecastTxn),
     baseline,
     remainingScheduled: upcoming.filter((u) => u.date > today && u.date <= monthEndIso),
+    period,
   })
 
   const billsPaid = txns.filter((t) => t.recurring_payment_id && t.amount_minor < 0)
-  const dueThisMonth = upcoming.filter((u) => u.date <= `${month.slice(0, 8)}${String(daysInMonth).padStart(2, '0')}` && u.amountMinor < 0)
+  const dueThisMonth = upcoming.filter((u) => u.date <= period.end && u.amountMinor < 0)
 
   const liquidNote = accounts.filter(
     (a) => LIQUID_ACCOUNT_TYPES.includes(a.account_type) && !a.archived_at,
@@ -259,17 +280,12 @@ export default function HomePage() {
       />
       <StalenessNote accounts={liquidNote} />
 
-      {/* Last month's review, surfaced while the month is fresh */}
-      {Number(today.slice(8, 10)) <= 10 && (
+      {/* Last period's review, surfaced while the new period is fresh */}
+      {dayOfMonth <= 10 && (
         <Link to="/review" className="block">
           <Card className="border-accent/40 transition-colors hover:bg-surface-2">
             <p className="text-sm font-medium">
-              Your{' '}
-              {new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toLocaleDateString(
-                'en-GB',
-                { month: 'long' },
-              )}{' '}
-              review is ready →
+              Your {paydayDay ? 'last pay period' : 'last month'} review is ready →
             </p>
             <p className="text-[11px] text-ink-muted">
               What went where, everyday spend vs typical, overdraft days and the biggest changes.
@@ -373,22 +389,27 @@ export default function HomePage() {
         )}
       </Card>
 
-      {/* Monthly position */}
+      {/* Pay-period position */}
       <Card>
         <CardTitle>
-          This month · day {dayOfMonth} of {daysInMonth}
+          {paydayDay ? `This pay period (${period.label}) · day ${dayOfMonth} of ${daysInMonth}` : `This month · day ${dayOfMonth} of ${daysInMonth}`}
         </CardTitle>
+        {paydayDay && (
+          <p className="-mt-1 mb-2 text-[11px] text-ink-faint">
+            Runs payday to payday — next payday {formatDateShort(period.nextPayday)}.
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
           <Stat
             label="Income received"
             value={money(incomeReceived)}
             onClick={() =>
               setDrill({
-                title: 'Income received this month',
+                title: 'Income received this period',
                 rows: toRows(contributions.filter((c) => c.amountMinor > 0)),
-                note: 'Money in since the 1st. Transfers between your own accounts, reimbursable items and anything excluded from budgeting are left out.',
+                note: `Money in since ${formatDateShort(period.start)}. Transfers between your own accounts, reimbursable items and anything excluded from budgeting are left out.`,
                 linkTo: `/transactions?${monthRange}`,
-                emptyHint: 'No income recorded this month yet.',
+                emptyHint: 'No income recorded this period yet.',
               })
             }
           />
@@ -397,11 +418,11 @@ export default function HomePage() {
             value={money(spendingToDate)}
             onClick={() =>
               setDrill({
-                title: 'Spending this month',
+                title: 'Spending this period',
                 rows: toRows(contributions.filter((c) => c.amountMinor < 0)),
                 note: 'Largest first. Transfers between your own accounts, reimbursable items and anything excluded from budgeting are left out.',
                 linkTo: `/transactions?${monthRange}`,
-                emptyHint: 'No spending recorded this month yet.',
+                emptyHint: 'No spending recorded this period yet.',
               })
             }
           />
@@ -411,7 +432,7 @@ export default function HomePage() {
             sub={money(billsPaid.reduce((s, t) => s + -t.amount_minor, 0))}
             onClick={() =>
               setDrill({
-                title: 'Bills paid this month',
+                title: 'Bills paid this period',
                 rows: billsPaid.map((t) => ({
                   id: t.id,
                   date: t.date,
@@ -419,7 +440,7 @@ export default function HomePage() {
                   sub: categoryLabel(categories, t.category_id),
                   amountMinor: t.amount_minor,
                 })),
-                note: 'Transactions this month that matched one of your bills.',
+                note: 'Transactions this period that matched one of your bills.',
                 linkTo: '/bills',
                 linkLabel: 'Manage bills',
                 emptyHint: 'No bills matched yet. Set them up on the Bills page and they’ll tick off automatically.',
@@ -432,17 +453,17 @@ export default function HomePage() {
             sub={money(dueThisMonth.reduce((s, u) => s + -u.amountMinor, 0))}
             onClick={() =>
               setDrill({
-                title: 'Bills still due this month',
+                title: 'Bills still due before payday',
                 rows: dueThisMonth.map((u, i) => ({
                   id: `d${i}`,
                   date: u.date,
                   label: u.name,
                   amountMinor: u.amountMinor,
                 })),
-                note: 'Expected from your bill schedule between today and month end.',
+                note: `Expected from your bill schedule between today and ${formatDateShort(period.end)} (the day before payday).`,
                 linkTo: '/bills',
                 linkLabel: 'Manage bills',
-                emptyHint: 'Nothing else expected before month end.',
+                emptyHint: 'Nothing else expected before your next payday.',
               })
             }
           />
@@ -454,7 +475,7 @@ export default function HomePage() {
                 tone={summary.remainingMinor < 0 ? 'bad' : undefined}
               />
               <Stat
-                label="Forecast month-end spend"
+                label={paydayDay ? 'Forecast spend by payday' : 'Forecast month-end spend'}
                 value={money(summary.forecastSpendMinor)}
                 sub="run-rate + committed bills"
                 tone={summary.forecastSpendMinor > summary.plannedSpendMinor ? 'warn' : undefined}
@@ -485,10 +506,11 @@ export default function HomePage() {
         {forecast.basis !== 'none' && (
           <div className="mt-3 rounded-lg bg-surface-2 px-3 py-2.5">
             <p className="text-sm">
-              Tracking to spend <strong>{money(forecast.forecastSpendMinor)}</strong> this month
+              Tracking to spend <strong>{money(forecast.forecastSpendMinor)}</strong> this{' '}
+              {paydayDay ? 'pay period' : 'month'}
               {forecast.basis === 'baseline'
-                ? ` — you typically spend ${money(baseline.perMonthMinor)} on everyday things plus your bills.`
-                : ' based on this month’s pace so far.'}
+                ? ` — you typically spend ${money(baseline.perMonthMinor)} on everyday things between paydays, plus your bills.`
+                : ' based on the pace so far.'}
             </p>
             <p
               className={`mt-1 text-sm font-medium ${
@@ -496,8 +518,8 @@ export default function HomePage() {
               }`}
             >
               {forecast.forecastEndBalanceMinor < 0
-                ? `That puts you about ${money(Math.abs(forecast.forecastEndBalanceMinor))} short by ${formatDateShort(monthEndIso)}.`
-                : `Leaves about ${money(forecast.forecastEndBalanceMinor)} at month end.`}{' '}
+                ? `That puts you about ${money(Math.abs(forecast.forecastEndBalanceMinor))} short before payday on ${formatDateShort(period.nextPayday)}.`
+                : `Leaves about ${money(forecast.forecastEndBalanceMinor)} when payday arrives on ${formatDateShort(period.nextPayday)}.`}{' '}
               <Link to="/cashflow" className="text-accent hover:underline">
                 See the projection
               </Link>
@@ -506,7 +528,7 @@ export default function HomePage() {
         )}
         {!budget && (
           <p className="mt-3 text-xs text-ink-faint">
-            No budget for this month yet.{' '}
+            No budget for this {paydayDay ? 'pay period' : 'month'} yet.{' '}
             <Link to="/budget" className="text-accent hover:underline">
               Create one
             </Link>
@@ -571,7 +593,7 @@ export default function HomePage() {
       {/* Spending donut */}
       {donutTop.length > 0 && (
         <Card>
-          <CardTitle>Spending by category this month</CardTitle>
+          <CardTitle>Spending by category this {paydayDay ? 'pay period' : 'month'}</CardTitle>
           <div className="flex flex-col items-center gap-3 sm:flex-row">
             <div className="h-44 w-44 shrink-0">
               <ResponsiveContainer>

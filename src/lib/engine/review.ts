@@ -30,8 +30,13 @@ export interface CategoryDelta {
   deltaMinor: Minor // positive = spent more this month
 }
 
+export interface ReviewRange {
+  start: string // inclusive
+  end: string // inclusive
+}
+
 export interface MonthlyReview {
-  month: string // YYYY-MM
+  month: string // period key: YYYY-MM for months, start date for pay periods
   incomeMinor: Minor
   totalOutMinor: Minor // all real money out (bills + everyday + one-offs)
   billsMinor: Minor
@@ -44,8 +49,8 @@ export interface MonthlyReview {
   baselineMinor: Minor
   baselineMonths: number
   vsBaselineMinor: Minor // everyday − baseline; positive = over
-  categoryDeltas: CategoryDelta[] // biggest movers vs previous month, desc |delta|
-  prevMonth: string | null // YYYY-MM actually used for the comparison
+  categoryDeltas: CategoryDelta[] // biggest movers vs previous period, desc |delta|
+  prevMonth: string | null // key of the period actually used for the comparison
 }
 
 const monthOf = (date: string) => date.slice(0, 7)
@@ -55,13 +60,20 @@ const isReal = (t: ReviewTxn) => !t.isTransfer && !t.excludeFromBudget && !t.isR
 const isEveryday = (t: ReviewTxn) =>
   t.amountMinor < 0 && isReal(t) && !t.recurringPaymentId && !t.isOneOff && !t.projectId
 
+const inRange = (t: ReviewTxn, r: ReviewRange) => t.date >= r.start && t.date <= r.end
+
 /**
- * Compute the review for `month` (YYYY-MM). `txns` should span the target
- * month plus enough history for the baseline (three complete months) and the
- * previous-month category comparison; anything outside is ignored where
- * irrelevant.
+ * Compute the review for one period (a calendar month or a pay period).
+ * `priors` are the periods immediately before it, newest first — up to three
+ * with data feed the everyday baseline, and the first with data is the
+ * comparison period for category movers. `key` labels the result (and
+ * `priorKey` labels the comparison); the caller decides how to display them.
  */
-export function monthlyReview(txns: ReviewTxn[], month: string): MonthlyReview {
+export function periodReview(
+  txns: ReviewTxn[],
+  current: ReviewRange & { key: string },
+  priors: (ReviewRange & { key: string })[],
+): MonthlyReview {
   let incomeMinor = 0
   let billsMinor = 0
   let everydayMinor = 0
@@ -69,7 +81,7 @@ export function monthlyReview(txns: ReviewTxn[], month: string): MonthlyReview {
   let projectMinor = 0
 
   for (const t of txns) {
-    if (monthOf(t.date) !== month || !isReal(t)) continue
+    if (!inRange(t, current) || !isReal(t)) continue
     if (t.amountMinor > 0) {
       incomeMinor += t.amountMinor
       continue
@@ -83,18 +95,11 @@ export function monthlyReview(txns: ReviewTxn[], month: string): MonthlyReview {
   const totalOutMinor = billsMinor + everydayMinor + oneOffMinor + projectMinor
   const netMinor = incomeMinor - totalOutMinor
 
-  // Baseline: median everyday spend of the last up-to-3 complete months
-  // strictly before the reviewed month.
-  const everydayByMonth = new Map<string, number>()
-  for (const t of txns) {
-    const m = monthOf(t.date)
-    if (m >= month || !isEveryday(t)) continue
-    everydayByMonth.set(m, (everydayByMonth.get(m) ?? 0) + -t.amountMinor)
-  }
-  const totals = [...everydayByMonth.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .slice(-3)
-    .map(([, v]) => v)
+  // Baseline: median everyday spend of up to three prior periods with data.
+  const priorsWithData = priors.filter((p) => txns.some((t) => inRange(t, p)))
+  const totals = priorsWithData
+    .slice(0, 3)
+    .map((p) => txns.filter((t) => isEveryday(t) && inRange(t, p)).reduce((s, t) => s + -t.amountMinor, 0))
     .sort((a, b) => a - b)
   const baselineMinor =
     totals.length === 0
@@ -103,19 +108,20 @@ export function monthlyReview(txns: ReviewTxn[], month: string): MonthlyReview {
         ? totals[Math.floor(totals.length / 2)]
         : Math.round((totals[totals.length / 2 - 1] + totals[totals.length / 2]) / 2)
 
-  // Category movers vs the immediately previous calendar month (everyday +
-  // one-off + project spend; bills move rarely and would drown the signal).
-  const prevMonth = prevMonthOf(month)
-  const spendByCat = (m: string) => {
+  // Category movers vs the immediately previous period (everyday + one-off +
+  // project spend; bills move rarely and would drown the signal).
+  const prevPeriod = priorsWithData[0] ?? null
+  const spendByCat = (r: ReviewRange | null) => {
     const out = new Map<string | null, number>()
+    if (!r) return out
     for (const t of txns) {
-      if (monthOf(t.date) !== m || t.amountMinor >= 0 || !isReal(t) || t.recurringPaymentId) continue
+      if (!inRange(t, r) || t.amountMinor >= 0 || !isReal(t) || t.recurringPaymentId) continue
       out.set(t.categoryId, (out.get(t.categoryId) ?? 0) + -t.amountMinor)
     }
     return out
   }
-  const cur = spendByCat(month)
-  const prev = spendByCat(prevMonth)
+  const cur = spendByCat(current)
+  const prev = spendByCat(prevPeriod)
   const catIds = new Set([...cur.keys(), ...prev.keys()])
   const categoryDeltas: CategoryDelta[] = [...catIds]
     .map((id) => {
@@ -126,10 +132,8 @@ export function monthlyReview(txns: ReviewTxn[], month: string): MonthlyReview {
     .filter((d) => d.deltaMinor !== 0)
     .sort((a, b) => Math.abs(b.deltaMinor) - Math.abs(a.deltaMinor))
 
-  const hasPrevData = txns.some((t) => monthOf(t.date) === prevMonth)
-
   return {
-    month,
+    month: current.key,
     incomeMinor,
     totalOutMinor,
     billsMinor,
@@ -142,8 +146,25 @@ export function monthlyReview(txns: ReviewTxn[], month: string): MonthlyReview {
     baselineMonths: totals.length,
     vsBaselineMinor: everydayMinor - baselineMinor,
     categoryDeltas,
-    prevMonth: hasPrevData ? prevMonth : null,
+    prevMonth: prevPeriod?.key ?? null,
   }
+}
+
+/**
+ * Calendar-month review — `periodReview` over month boundaries. `txns` should
+ * span the target month plus enough history for the baseline and comparison.
+ */
+export function monthlyReview(txns: ReviewTxn[], month: string): MonthlyReview {
+  const rangeOf = (m: string): ReviewRange & { key: string } => {
+    const days = new Date(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0).getDate()
+    return { key: m, start: `${m}-01`, end: `${m}-${String(days).padStart(2, '0')}` }
+  }
+  // Priors = every earlier month present in the data, newest first, so the
+  // baseline can use up to three complete months even across gaps.
+  const priorMonths = [...new Set(txns.map((t) => monthOf(t.date)))]
+    .filter((m) => m < month)
+    .sort((a, b) => b.localeCompare(a))
+  return periodReview(txns, rangeOf(month), priorMonths.map(rangeOf))
 }
 
 export function prevMonthOf(month: string): string {

@@ -261,6 +261,11 @@ export default function SettingsPage() {
               }}
               placeholder="e.g. 28"
             />
+            <p className="mt-1 text-[11px] text-ink-faint">
+              The whole app runs payday to payday: budgets, forecasts and reviews cover this day to
+              the day before the next one. When it falls on a weekend, pay is treated as arriving
+              the Friday before.
+            </p>
           </div>
           <div className="col-span-2">
             <Label>Uploaded documents after extraction</Label>
