@@ -51,6 +51,10 @@ const BALANCE_SOURCE_LABELS: Record<Liability['balance_source'], string> = {
 export default function DebtsPage() {
   const userId = useUserId()
   const qc = useQueryClient()
+  // Declared BEFORE the query below: refetchInterval runs synchronously
+  // during useQuery setup when cached data exists, so referencing a const
+  // declared later crashed every revisit of this page (temporal dead zone).
+  const uploadingRef = useRef(false)
   const { data: liabilities, isLoading } = useQuery({ queryKey: ['liabilities'], queryFn: fetchLiabilities })
   const { data: pendingContracts } = useQuery({
     queryKey: ['loan-contracts'],
@@ -60,7 +64,6 @@ export default function DebtsPage() {
   const [adding, setAdding] = useState(false)
   const [uploadMsg, setUploadMsg] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-  const uploadingRef = useRef(false)
 
   const upload = useMutation({
     mutationFn: async (file: File) => {
