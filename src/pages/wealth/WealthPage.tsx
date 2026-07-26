@@ -1,10 +1,33 @@
 import { assignColors, chartAxis, dateTooltipLabel, gbpTooltip, gridStroke, isDarkMode, tooltipStyle } from '@/components/charts/theme'
-import { PageHeader, Stat } from '@/components/shared/common'
-import { Badge, Card, CardTitle, Spinner, Switch } from '@/components/ui/primitives'
-import { buildNetWorthItems, fetchAccounts, fetchLiabilities, fetchNetWorthHistory } from '@/lib/api'
+import { AccountSelect, MoneyInput, PageHeader, Stat } from '@/components/shared/common'
+import {
+  Badge,
+  Button,
+  Card,
+  CardTitle,
+  Dialog,
+  Input,
+  Label,
+  ProgressBar,
+  Select,
+  Spinner,
+  Switch,
+} from '@/components/ui/primitives'
+import { useUserId } from '@/context/AuthContext'
+import {
+  buildNetWorthItems,
+  deleteSavingsGoal,
+  fetchAccounts,
+  fetchLiabilities,
+  fetchNetWorthHistory,
+  fetchSavingsGoals,
+  upsertSavingsGoal,
+} from '@/lib/api'
 import { adjustedNetWorth } from '@/lib/engine/networth'
-import { formatDateShort, formatDateTime, money } from '@/lib/format'
-import { useQuery } from '@tanstack/react-query'
+import { formatDate, formatDateShort, formatDateTime, money } from '@/lib/format'
+import type { Account, SavingsGoal } from '@/types/domain'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Plus } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import {
   Cell,
@@ -92,6 +115,8 @@ export default function WealthPage() {
           </div>
         )}
       </Card>
+
+      <GoalsSection accounts={accounts} />
 
       {/* Adjusted view */}
       <Card>
@@ -224,6 +249,352 @@ export default function WealthPage() {
         ))}
       </div>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------- goals
+const GOAL_KINDS: { value: SavingsGoal['kind']; label: string }[] = [
+  { value: 'emergency_fund', label: 'Emergency fund' },
+  { value: 'goal', label: 'Goal' },
+  { value: 'sinking_fund', label: 'Sinking fund' },
+  { value: 'purchase', label: 'Purchase' },
+  { value: 'debt_pot', label: 'Debt pot' },
+  { value: 'general', label: 'General' },
+]
+
+function monthsUntil(dateIso: string): number {
+  const now = new Date()
+  const target = new Date(dateIso)
+  return Math.max(
+    0,
+    (target.getFullYear() - now.getFullYear()) * 12 + target.getMonth() - now.getMonth(),
+  )
+}
+
+function GoalsSection({ accounts }: { accounts: Account[] }) {
+  const userId = useUserId()
+  const qc = useQueryClient()
+  const { data: goals } = useQuery({ queryKey: ['savings-goals'], queryFn: fetchSavingsGoals })
+  const [editing, setEditing] = useState<SavingsGoal | null>(null)
+  const [adding, setAdding] = useState(false)
+  const [contributing, setContributing] = useState<SavingsGoal | null>(null)
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ['savings-goals'] })
+
+  // A goal linked to an account tracks that account's live balance — the
+  // stored current_minor is only used for unlinked goals.
+  const currentOf = (g: SavingsGoal): number => {
+    if (g.linked_account_id) {
+      const acc = accounts.find((a) => a.id === g.linked_account_id)
+      if (acc) return acc.balance_minor
+    }
+    return g.current_minor
+  }
+
+  const list = goals ?? []
+
+  return (
+    <Card>
+      <div className="mb-2 flex items-center justify-between">
+        <CardTitle className="mb-0">Savings goals</CardTitle>
+        <Button size="sm" variant="outline" onClick={() => setAdding(true)}>
+          <Plus className="h-3.5 w-3.5" /> New goal
+        </Button>
+      </div>
+
+      {list.length === 0 && (
+        <p className="text-xs text-ink-faint">
+          Set a target — an emergency fund, a purchase, a pot for annual bills — and watch it fill.
+          Link a goal to a savings account and it tracks that account's balance automatically.
+        </p>
+      )}
+
+      <div className="space-y-3">
+        {list.map((g) => {
+          const current = currentOf(g)
+          const pct = g.target_minor > 0 ? (current / g.target_minor) * 100 : 0
+          const done = g.status === 'achieved' || current >= g.target_minor
+          const remaining = Math.max(0, g.target_minor - current)
+          const months = g.target_date ? monthsUntil(g.target_date) : null
+          const neededPerMonth = months && months > 0 ? Math.ceil(remaining / months) : null
+          const linkedName = g.linked_account_id
+            ? accounts.find((a) => a.id === g.linked_account_id)?.name
+            : null
+          return (
+            <div key={g.id} className="rounded-lg border border-border p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-sm font-medium">{g.name}</p>
+                    {done && <Badge tone="good">achieved 🎉</Badge>}
+                  </div>
+                  <p className="text-[11px] text-ink-faint">
+                    {GOAL_KINDS.find((k) => k.value === g.kind)?.label ?? g.kind}
+                    {linkedName ? ` · tracks ${linkedName}` : ''}
+                    {g.target_date ? ` · by ${formatDate(g.target_date)}` : ''}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  {!g.linked_account_id && !done && (
+                    <Button size="sm" variant="secondary" onClick={() => setContributing(g)}>
+                      + Add
+                    </Button>
+                  )}
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(g)}>
+                    Edit
+                  </Button>
+                </div>
+              </div>
+              <div className="mt-2 flex items-baseline justify-between">
+                <p className="tnum text-sm font-semibold">
+                  {money(current)} <span className="font-normal text-ink-muted">of {money(g.target_minor)}</span>
+                </p>
+                <span className="text-xs text-ink-muted">{Math.min(100, Math.round(pct))}%</span>
+              </div>
+              <ProgressBar className="mt-1.5" value={Math.min(pct, 100)} tone={done ? 'good' : 'accent'} />
+              {!done && neededPerMonth !== null && (
+                <p className="mt-1 text-[11px] text-ink-faint">
+                  {money(remaining)} to go · needs {money(neededPerMonth)}/month to hit{' '}
+                  {formatDate(g.target_date!)}
+                </p>
+              )}
+              {!done && neededPerMonth === null && remaining > 0 && g.monthly_planned_minor > 0 && (
+                <p className="mt-1 text-[11px] text-ink-faint">
+                  {money(remaining)} to go · at {money(g.monthly_planned_minor)}/month that's ~
+                  {Math.ceil(remaining / g.monthly_planned_minor)} months
+                </p>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {(adding || editing) && (
+        <GoalDialog
+          goal={editing}
+          accounts={accounts}
+          userId={userId}
+          onClose={() => {
+            setAdding(false)
+            setEditing(null)
+          }}
+          onSaved={invalidate}
+        />
+      )}
+      {contributing && (
+        <ContributeDialog
+          goal={contributing}
+          userId={userId}
+          onClose={() => setContributing(null)}
+          onSaved={invalidate}
+        />
+      )}
+    </Card>
+  )
+}
+
+function GoalDialog({
+  goal,
+  accounts,
+  userId,
+  onClose,
+  onSaved,
+}: {
+  goal: SavingsGoal | null
+  accounts: Account[]
+  userId: string
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const savingsAccounts = accounts.filter((a) =>
+    ['savings', 'current', 'investment', 'cash', 'wallet'].includes(a.account_type),
+  )
+  const [form, setForm] = useState({
+    name: goal?.name ?? '',
+    kind: goal?.kind ?? ('goal' as SavingsGoal['kind']),
+    target_minor: goal?.target_minor ?? null,
+    current_minor: goal?.current_minor ?? 0,
+    target_date: goal?.target_date ?? '',
+    monthly_planned_minor: goal?.monthly_planned_minor ?? null,
+    linked_account_id: goal?.linked_account_id ?? null,
+  })
+  const [error, setError] = useState<string | null>(null)
+
+  const save = useMutation({
+    mutationFn: () =>
+      upsertSavingsGoal(
+        userId,
+        {
+          name: form.name.trim(),
+          kind: form.kind,
+          target_minor: form.target_minor ?? 0,
+          current_minor: form.linked_account_id ? 0 : form.current_minor,
+          target_date: form.target_date || null,
+          monthly_planned_minor: form.monthly_planned_minor ?? 0,
+          linked_account_id: form.linked_account_id,
+        },
+        goal?.id,
+      ),
+    onSuccess: () => {
+      onSaved()
+      onClose()
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+
+  const remove = useMutation({
+    mutationFn: () => deleteSavingsGoal(goal!.id),
+    onSuccess: () => {
+      onSaved()
+      onClose()
+    },
+  })
+
+  return (
+    <Dialog open onClose={onClose} title={goal ? 'Edit goal' : 'New savings goal'}>
+      <form
+        className="space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault()
+          save.mutate()
+        }}
+      >
+        <div>
+          <Label>Name</Label>
+          <Input
+            required
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            placeholder="e.g. Emergency fund"
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label>Target</Label>
+            <MoneyInput
+              valueMinor={form.target_minor}
+              onChangeMinor={(m) => setForm({ ...form, target_minor: m })}
+            />
+          </div>
+          <div>
+            <Label>Type</Label>
+            <Select
+              value={form.kind}
+              onChange={(e) => setForm({ ...form, kind: e.target.value as SavingsGoal['kind'] })}
+            >
+              {GOAL_KINDS.map((k) => (
+                <option key={k.value} value={k.value}>
+                  {k.label}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div>
+            <Label>Target date (optional)</Label>
+            <Input
+              type="date"
+              value={form.target_date}
+              onChange={(e) => setForm({ ...form, target_date: e.target.value })}
+            />
+          </div>
+          <div>
+            <Label>Planned per month (optional)</Label>
+            <MoneyInput
+              valueMinor={form.monthly_planned_minor}
+              onChangeMinor={(m) => setForm({ ...form, monthly_planned_minor: m })}
+            />
+          </div>
+        </div>
+        <div>
+          <Label>Track an account's balance (optional)</Label>
+          <AccountSelect
+            accounts={savingsAccounts}
+            value={form.linked_account_id}
+            onChange={(v) => setForm({ ...form, linked_account_id: v })}
+            allowNone
+          />
+          <p className="mt-1 text-[11px] text-ink-faint">
+            Linked goals read the account balance automatically; unlinked goals are topped up by hand.
+          </p>
+        </div>
+        {!form.linked_account_id && (
+          <div>
+            <Label>Saved so far</Label>
+            <MoneyInput
+              valueMinor={form.current_minor}
+              onChangeMinor={(m) => setForm({ ...form, current_minor: m ?? 0 })}
+            />
+          </div>
+        )}
+        {error && <p className="text-xs text-bad">{error}</p>}
+        <div className="flex justify-between">
+          {goal ? (
+            <Button type="button" variant="ghost" className="text-bad" onClick={() => remove.mutate()}>
+              Delete
+            </Button>
+          ) : (
+            <span />
+          )}
+          <Button type="submit" disabled={save.isPending || !form.name.trim() || !form.target_minor}>
+            {save.isPending ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
+  )
+}
+
+function ContributeDialog({
+  goal,
+  userId,
+  onClose,
+  onSaved,
+}: {
+  goal: SavingsGoal
+  userId: string
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [amount, setAmount] = useState<number | null>(null)
+  const save = useMutation({
+    mutationFn: () => {
+      const next = goal.current_minor + (amount ?? 0)
+      return upsertSavingsGoal(
+        userId,
+        {
+          name: goal.name,
+          target_minor: goal.target_minor,
+          current_minor: next,
+          ...(next >= goal.target_minor ? { status: 'achieved' as const } : {}),
+        },
+        goal.id,
+      )
+    },
+    onSuccess: () => {
+      onSaved()
+      onClose()
+    },
+  })
+  const next = goal.current_minor + (amount ?? 0)
+  return (
+    <Dialog open onClose={onClose} title={`Add to ${goal.name}`}>
+      <div className="space-y-3">
+        <div>
+          <Label>Amount added</Label>
+          <MoneyInput valueMinor={amount} onChangeMinor={setAmount} />
+        </div>
+        <p className="text-xs text-ink-muted">
+          {money(goal.current_minor)} → <strong className="tnum">{money(next)}</strong> of{' '}
+          {money(goal.target_minor)}
+          {next >= goal.target_minor && ' — goal achieved 🎉'}
+        </p>
+        <div className="flex justify-end">
+          <Button disabled={!amount || save.isPending} onClick={() => save.mutate()}>
+            {save.isPending ? 'Saving…' : 'Add'}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
   )
 }
 

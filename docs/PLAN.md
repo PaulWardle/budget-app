@@ -56,6 +56,15 @@ All money = bigint minor units. All private tables: `user_id` + RLS (= auth.uid(
       data quality dashboard
 - [x] **8 Hardening** — engine tests, security review, docs, deployment config
 
+## Post-v1 phases (from the live-usage audit)
+
+- [x] **P1 Truth** — real debts from payment history, contract extraction reachable,
+      household contributions, overdraft analysis, tidy-ups card
+- [x] **P2 Honest numbers** — full-ledger AI aggregates, engine-computed month position
+      in AI context, auto-generated insights, commitments view, processor merchants
+- [x] **P3 Direction** — projects (one-off pots with budgets), savings goals UI
+      (linked accounts, contributions, monthly-needed maths), monthly review page
+
 ## Deliberate v1 decisions (simplest reliable option, documented)
 
 - Single currency display (GBP) with per-record currency codes stored for later FX.

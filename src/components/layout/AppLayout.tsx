@@ -3,9 +3,11 @@ import { useAuth } from '@/context/AuthContext'
 import { useTheme } from '@/context/ThemeContext'
 import { cn } from '@/lib/utils'
 import {
+  CalendarCheck,
   CalendarClock,
   CreditCard,
   FileUp,
+  FolderKanban,
   Landmark,
   LayoutDashboard,
   Lightbulb,
@@ -28,6 +30,8 @@ const NAV = [
   { to: '/debts', label: 'Debts', icon: CreditCard },
   { to: '/wealth', label: 'Wealth', icon: Landmark },
   { to: '/bills', label: 'Bills', icon: CalendarClock },
+  { to: '/projects', label: 'Projects', icon: FolderKanban },
+  { to: '/review', label: 'Review', icon: CalendarCheck },
   { to: '/insights', label: 'Insights', icon: Lightbulb, mobile: true },
   { to: '/chat', label: 'AI Chat', icon: MessageSquare, mobile: true, mobileLabel: 'Chat' },
   { to: '/imports', label: 'Imports', icon: FileUp },

@@ -40,6 +40,8 @@ const ImportsPage = lazyPage(() => import('./pages/imports/ImportsPage'))
 const ImportReviewPage = lazyPage(() => import('./pages/imports/ImportReviewPage'))
 const AccountsPage = lazyPage(() => import('./pages/accounts/AccountsPage'))
 const SettingsPage = lazyPage(() => import('./pages/settings/SettingsPage'))
+const ProjectsPage = lazyPage(() => import('./pages/projects/ProjectsPage'))
+const ReviewPage = lazyPage(() => import('./pages/review/ReviewPage'))
 
 function Loading() {
   return (
@@ -89,6 +91,8 @@ export default function App() {
           <Route path="/wealth" element={<WealthPage />} />
           <Route path="/bills" element={<BillsPage />} />
           <Route path="/insights" element={<InsightsPage />} />
+          <Route path="/projects" element={<ProjectsPage />} />
+          <Route path="/review" element={<ReviewPage />} />
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/imports" element={<ImportsPage />} />
           <Route path="/imports/:batchId" element={<ImportReviewPage />} />

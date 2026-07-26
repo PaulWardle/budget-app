@@ -259,6 +259,25 @@ export default function HomePage() {
       />
       <StalenessNote accounts={liquidNote} />
 
+      {/* Last month's review, surfaced while the month is fresh */}
+      {Number(today.slice(8, 10)) <= 10 && (
+        <Link to="/review" className="block">
+          <Card className="border-accent/40 transition-colors hover:bg-surface-2">
+            <p className="text-sm font-medium">
+              Your{' '}
+              {new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).toLocaleDateString(
+                'en-GB',
+                { month: 'long' },
+              )}{' '}
+              review is ready →
+            </p>
+            <p className="text-[11px] text-ink-muted">
+              What went where, everyday spend vs typical, overdraft days and the biggest changes.
+            </p>
+          </Card>
+        </Link>
+      )}
+
       {/* Position */}
       <Card>
         <CardTitle>Financial position</CardTitle>

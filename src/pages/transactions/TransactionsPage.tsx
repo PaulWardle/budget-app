@@ -24,6 +24,7 @@ import {
   deleteTransaction,
   fetchAccounts,
   fetchCategories,
+  fetchProjects,
   fetchTransactions,
   learnMerchant,
   setTransactionSplits,
@@ -117,11 +118,16 @@ export default function TransactionsPage() {
     uncategorised: params.get('uncategorised') === '1' || undefined,
     importBatchId: params.get('batch') ?? undefined,
     duplicatesOnly: params.get('duplicates') === '1' || undefined,
+    projectId: params.get('project') ?? undefined,
   })
   // Default to current-month stats. Links that bring their own scope (a date
   // range, the uncategorised/duplicates views, a batch) keep it instead.
   const defaultPresetFor = (f: TxnFilters & { duplicatesOnly?: boolean }): string =>
-    f.from || f.to ? 'custom' : f.uncategorised || f.duplicatesOnly || f.importBatchId ? 'all' : 'month'
+    f.from || f.to
+      ? 'custom'
+      : f.uncategorised || f.duplicatesOnly || f.importBatchId || f.projectId
+        ? 'all'
+        : 'month'
   const [preset, setPreset] = useState<string>(() => defaultPresetFor(filtersFromParams()))
   const [filters, setFilters] = useState<TxnFilters & { duplicatesOnly?: boolean }>(() => {
     const f = filtersFromParams()
@@ -144,6 +150,8 @@ export default function TransactionsPage() {
 
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
+  const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects })
+  const projectName = (id: string | null) => projects?.find((p) => p.id === id)?.name
   const effective = useMemo(
     () => ({
       ...filters,
@@ -471,6 +479,9 @@ export default function TransactionsPage() {
                 </span>
               )}
               {t.is_transfer && <Badge>transfer</Badge>}
+              {t.project_id && projectName(t.project_id) && (
+                <Badge tone="accent">{projectName(t.project_id)}</Badge>
+              )}
               {t.is_reimbursable && <Badge tone="accent">reimbursable</Badge>}
               {t.exclude_from_budget && !t.is_transfer && <Badge>excluded</Badge>}
               {t.needs_review && <ConfidenceBadge value={t.confidence} />}
@@ -512,6 +523,7 @@ function TxnDialog({
 }) {
   const { data: accounts } = useQuery({ queryKey: ['accounts'], queryFn: fetchAccounts })
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: fetchCategories })
+  const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects })
   const [form, setForm] = useState({
     account_id: txn?.account_id ?? '',
     date: txn?.date ?? todayIso(),
@@ -526,6 +538,7 @@ function TxnDialog({
     exclude_from_analytics: txn?.exclude_from_analytics ?? false,
     notes: txn?.notes ?? '',
     tags: (txn?.tags ?? []).join(', '),
+    project_id: txn?.project_id ?? null,
   })
   const [splits, setSplits] = useState<{ category_id: string | null; amount_minor: number | null }[]>(
     txn?.transaction_splits?.map((s) => ({ category_id: s.category_id, amount_minor: s.amount_minor })) ?? [],
@@ -550,6 +563,10 @@ function TxnDialog({
         notes: form.notes || null,
         tags: form.tags.split(',').map((t) => t.trim()).filter(Boolean),
         needs_review: false,
+        project_id: form.project_id,
+        // Project spend is one-off by definition — it must not feed the
+        // "typical month" baseline. Clearing the project leaves the flag as-is.
+        ...(form.project_id && !txn?.project_id ? { is_one_off: true } : {}),
       }
       let id = txn?.id
       if (id) await updateTransaction(userId, id, payload)
@@ -670,6 +687,24 @@ function TxnDialog({
             <Label>Tags (comma separated)</Label>
             <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
           </div>
+          {(projects ?? []).filter((p) => p.status === 'active' || p.id === form.project_id).length > 0 && (
+            <div>
+              <Label>Project</Label>
+              <Select
+                value={form.project_id ?? ''}
+                onChange={(e) => setForm({ ...form, project_id: e.target.value || null })}
+              >
+                <option value="">None</option>
+                {(projects ?? [])
+                  .filter((p) => p.status === 'active' || p.id === form.project_id)
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+              </Select>
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-2">

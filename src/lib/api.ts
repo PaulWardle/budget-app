@@ -28,6 +28,7 @@ import {
   type Merchant,
   type MerchantAlias,
   type NetWorthSnapshot,
+  type Project,
   type RecurringPayment,
   type SavingsGoal,
   type Transaction,
@@ -384,6 +385,7 @@ export interface TxnFilters {
   needsReview?: boolean
   importBatchId?: string
   recurringOnly?: boolean
+  projectId?: string
   limit?: number
 }
 
@@ -407,6 +409,7 @@ export async function fetchTransactions(filters: TxnFilters = {}): Promise<Trans
   if (filters.needsReview) q = q.eq('needs_review', true)
   if (filters.importBatchId) q = q.eq('import_batch_id', filters.importBatchId)
   if (filters.recurringOnly) q = q.not('recurring_payment_id', 'is', null)
+  if (filters.projectId) q = q.eq('project_id', filters.projectId)
   if (filters.search) q = q.or(`description.ilike.%${filters.search}%,merchant_name.ilike.%${filters.search}%,notes.ilike.%${filters.search}%`)
   const { data, error } = await q
   throwIf(error)
@@ -979,6 +982,71 @@ export async function upsertSavingsGoal(
   throwIf(error)
   await recordAudit({ userId, recordType: 'savings_goal', recordId: data!.id, action: 'insert', next: input, undoable: true })
   return data as SavingsGoal
+}
+
+export async function deleteSavingsGoal(id: string): Promise<void> {
+  const { error } = await supabase.from('savings_goals').update({ status: 'archived' }).eq('id', id)
+  throwIf(error)
+}
+
+// ----------------------------------------------------------------- projects
+export async function fetchProjects(): Promise<Project[]> {
+  const { data, error } = await supabase
+    .from('projects')
+    .select('*')
+    .neq('status', 'abandoned')
+    .order('created_at', { ascending: false })
+  throwIf(error)
+  return (data ?? []) as Project[]
+}
+
+export async function upsertProject(
+  userId: string,
+  input: Partial<Project> & { name: string },
+  id?: string,
+): Promise<Project> {
+  if (id) {
+    const { data, error } = await supabase.from('projects').update(input).eq('id', id).select().single()
+    throwIf(error)
+    return data as Project
+  }
+  const { data, error } = await supabase
+    .from('projects')
+    .insert({ ...input, user_id: userId })
+    .select()
+    .single()
+  throwIf(error)
+  await recordAudit({ userId, recordType: 'project', recordId: data!.id, action: 'insert', next: input, undoable: true })
+  return data as Project
+}
+
+/** Assign or clear a transaction's project. Assigning also flags the row
+ * one-off — project spend is by definition not everyday running cost — but
+ * clearing leaves is_one_off alone in case it was set deliberately. */
+export async function setTransactionProject(id: string, projectId: string | null): Promise<void> {
+  const patch: Record<string, unknown> = { project_id: projectId }
+  if (projectId) patch.is_one_off = true
+  const { error } = await supabase.from('transactions').update(patch).eq('id', id)
+  throwIf(error)
+}
+
+/** Spend per project across all time (transfers excluded). */
+export async function fetchProjectSpend(): Promise<Map<string, { spentMinor: number; count: number; lastDate: string | null }>> {
+  const { data, error } = await supabase
+    .from('transactions')
+    .select('project_id,amount_minor,is_transfer,date')
+    .not('project_id', 'is', null)
+  throwIf(error)
+  const out = new Map<string, { spentMinor: number; count: number; lastDate: string | null }>()
+  for (const t of (data ?? []) as { project_id: string; amount_minor: number; is_transfer: boolean; date: string }[]) {
+    if (t.is_transfer) continue
+    const cur = out.get(t.project_id) ?? { spentMinor: 0, count: 0, lastDate: null }
+    cur.spentMinor += -t.amount_minor // refunds reduce the total
+    cur.count += 1
+    if (cur.lastDate === null || t.date > cur.lastDate) cur.lastDate = t.date
+    out.set(t.project_id, cur)
+  }
+  return out
 }
 
 // -------------------------------------------------------------------- facts

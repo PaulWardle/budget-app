@@ -118,6 +118,7 @@ export interface Transaction {
   liability_id: string | null
   confidence: number | null
   needs_review: boolean
+  project_id: string | null
   dedupe_ignored: boolean
   /** Unusual spend: counted in the month, but ignored when measuring what's typical. */
   is_one_off: boolean
@@ -254,6 +255,17 @@ export interface SavingsGoal {
   priority: number
   status: 'active' | 'achieved' | 'paused' | 'archived'
   notes: string | null
+}
+
+export interface Project {
+  id: string
+  name: string
+  status: 'active' | 'complete' | 'paused' | 'abandoned'
+  budget_minor: number | null
+  started_on: string | null
+  target_date: string | null
+  notes: string | null
+  created_at: string
 }
 
 export interface FinancialFact {
