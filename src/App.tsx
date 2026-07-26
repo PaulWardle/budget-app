@@ -15,8 +15,11 @@ import LoginPage from './pages/auth/LoginPage'
 function lazyPage<T extends { default: React.ComponentType<unknown> }>(load: () => Promise<T>) {
   return lazy(() =>
     load().catch((err: unknown) => {
-      const stale = sessionStorage.getItem('chunk-reload')
-      if (!stale) {
+      // Time-based guard, not once-per-session: consecutive deploys (or a
+      // stale-cached first reload) would otherwise burn the only attempt and
+      // strand the user on a blank page. 10s still prevents a reload loop.
+      const last = Number(sessionStorage.getItem('chunk-reload') ?? 0)
+      if (Date.now() - last > 10_000) {
         sessionStorage.setItem('chunk-reload', String(Date.now()))
         window.location.reload()
         return new Promise<T>(() => {}) // never resolves; the reload takes over
