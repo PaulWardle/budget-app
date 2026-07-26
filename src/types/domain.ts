@@ -122,6 +122,8 @@ export interface Transaction {
   dedupe_ignored: boolean
   /** Unusual spend: counted in the month, but ignored when measuring what's typical. */
   is_one_off: boolean
+  /** Expected bill posted on its due date; replaced or removed when statements arrive. */
+  is_presumed: boolean
   source: string
   transaction_splits?: TransactionSplit[]
 }

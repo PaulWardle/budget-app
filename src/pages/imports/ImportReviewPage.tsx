@@ -1,7 +1,7 @@
 import { AccountSelect, CategorySelect, ConfidenceBadge, MoneyInput, PageHeader } from '@/components/shared/common'
 import { Badge, Button, Card, Input, Spinner } from '@/components/ui/primitives'
 import { useUserId } from '@/context/AuthContext'
-import { fetchAccounts, fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, recordAudit, syncBillPrices, syncDebtLinks, syncRecurringFromLedger, updateAccount } from '@/lib/api'
+import { fetchAccounts, fetchBatchItems, fetchBatches, fetchCategories, learnMerchant, linkBillTransactions, reconcilePresumed, recordAudit, syncBillPrices, syncDebtLinks, syncRecurringFromLedger, updateAccount } from '@/lib/api'
 import { resolveCategoryId, suggestFromDescription } from '@/lib/autoCategorise'
 import { dedupeHash } from '@/lib/engine/duplicates'
 import { formatDate, money, todayIso } from '@/lib/format'
@@ -226,10 +226,14 @@ export default function ImportReviewPage() {
       // Turn the new history into known bills so Home, Cashflow and Bills
       // have something to show without any extra steps.
       await syncRecurringFromLedger(userId).catch(() => {})
+      // New payments of already-known bills get linked to them
+      await linkBillTransactions().catch(() => {})
       // Debt payments in the batch move their debt's record and balance
       await syncDebtLinks(userId).catch(() => {})
       // Bills learn their real price from what the bank actually charged
       await syncBillPrices(userId).catch(() => {})
+      // Presumed bill postings resolve against actuals; balances true up
+      await reconcilePresumed(userId).catch(() => {})
       return confirmedCount
     },
     onSuccess: () => {

@@ -120,7 +120,9 @@ export async function processUpload(
     const ledger = effectiveAccountId
       ? await fetchTransactions({ accountId: effectiveAccountId, limit: 2000 })
       : []
-    const existing = ledger.map((t) => ({
+    // Presumed postings must never make the REAL payment look like a
+    // duplicate — reconciliation replaces them after confirm instead.
+    const existing = ledger.filter((t) => !t.is_presumed).map((t) => ({
       id: t.id,
       accountId: t.account_id,
       date: t.date,

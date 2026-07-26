@@ -7,6 +7,12 @@ import { ruleMatches, type MatchType } from '@/lib/engine/rules'
 import { detectRecurring, normaliseDescription } from '@/lib/engine/recurring'
 import { detectPriceChange } from '@/lib/engine/pricerise'
 import {
+  presumedAdjustedBalance,
+  reconcilePresumptions,
+  type ActualTxn,
+  type PresumedTxn,
+} from '@/lib/engine/presume'
+import {
   LIABILITY_ACCOUNT_TYPES,
   LIQUID_ACCOUNT_TYPES,
   type Account,
@@ -753,6 +759,7 @@ export async function syncBillPrices(userId: string): Promise<number> {
       .from('transactions')
       .select('date,amount_minor,recurring_payment_id')
       .not('recurring_payment_id', 'is', null)
+      .eq('is_presumed', false) // estimates echo the stored price — only real charges teach
       .gte('date', from.toISOString().slice(0, 10)),
   ])
   const byBill = new Map<string, { date: string; amountMinor: number }[]>()
@@ -793,6 +800,193 @@ export async function syncBillPrices(userId: string): Promise<number> {
   return updated
 }
 
+/**
+ * Link freshly imported transactions to the bills they belong to. Detection
+ * links a bill's history once, at creation — without this, later imports of
+ * the same bill arrive unlinked, which starves price detection, "bills
+ * paid", and presumption reconciliation. Matches on the bill's stored match
+ * key (notes) or normalised name.
+ */
+export async function linkBillTransactions(): Promise<number> {
+  const from = new Date()
+  from.setDate(from.getDate() - 90)
+  const [{ data: rps }, { data: txns }] = await Promise.all([
+    supabase
+      .from('recurring_payments')
+      .select('id,name,notes,amount_minor')
+      .eq('status', 'active'),
+    supabase
+      .from('transactions')
+      .select('id,description,amount_minor')
+      .is('recurring_payment_id', null)
+      .eq('is_transfer', false)
+      .eq('is_presumed', false)
+      .gte('date', from.toISOString().slice(0, 10)),
+  ])
+  const byKey = new Map<string, { id: string; amountMinor: number }>()
+  for (const r of (rps ?? []) as Pick<RecurringPayment, 'id' | 'name' | 'notes' | 'amount_minor'>[]) {
+    const entry = { id: r.id, amountMinor: r.amount_minor }
+    if (r.notes) byKey.set(r.notes.toUpperCase(), entry)
+    byKey.set(normaliseDescription(r.name), entry)
+  }
+  const updates = new Map<string, string[]>()
+  for (const t of (txns ?? []) as { id: string; description: string; amount_minor: number }[]) {
+    const bill = byKey.get(normaliseDescription(t.description))
+    // same direction, and within 2x of the bill's price — a £5 card top-up
+    // at the same merchant is not the £33 contract payment
+    if (
+      !bill ||
+      Math.sign(t.amount_minor) !== Math.sign(bill.amountMinor) ||
+      Math.abs(t.amount_minor) > Math.abs(bill.amountMinor) * 2 ||
+      Math.abs(t.amount_minor) < Math.abs(bill.amountMinor) * 0.5
+    )
+      continue
+    updates.set(bill.id, [...(updates.get(bill.id) ?? []), t.id])
+  }
+  let linked = 0
+  for (const [rpId, ids] of updates) {
+    const { error } = await supabase
+      .from('transactions')
+      .update({ recurring_payment_id: rpId })
+      .in('id', ids)
+    if (!error) linked += ids.length
+  }
+  return linked
+}
+
+/**
+ * Self-correction: resolve presumed bill postings against the real ledger
+ * (see engine/presume.ts), then set each touched account's balance to
+ * statement truth minus whatever is still presumed beyond the statement.
+ * Runs after every import confirm — the "meter reading" moment.
+ */
+export async function reconcilePresumed(userId: string): Promise<{ replaced: number; expired: number }> {
+  const { data: pRows } = await supabase
+    .from('transactions')
+    .select('id,account_id,date,amount_minor,recurring_payment_id')
+    .eq('is_presumed', true)
+  const presumed: PresumedTxn[] = ((pRows ?? []) as Pick<Transaction, 'id' | 'account_id' | 'date' | 'amount_minor' | 'recurring_payment_id'>[]).map((t) => ({
+    id: t.id,
+    accountId: t.account_id,
+    date: t.date,
+    amountMinor: t.amount_minor,
+    recurringPaymentId: t.recurring_payment_id,
+  }))
+  if (presumed.length === 0) return { replaced: 0, expired: 0 }
+
+  const earliest = presumed.map((p) => p.date).sort()[0]
+  const from = new Date(earliest)
+  from.setDate(from.getDate() - 10)
+  const { data: aRows } = await supabase
+    .from('transactions')
+    .select('id,account_id,date,amount_minor,recurring_payment_id')
+    .eq('is_presumed', false)
+    .eq('is_transfer', false)
+    .gte('date', from.toISOString().slice(0, 10))
+  const actuals: ActualTxn[] = ((aRows ?? []) as Pick<Transaction, 'id' | 'account_id' | 'date' | 'amount_minor' | 'recurring_payment_id'>[]).map((t) => ({
+    id: t.id,
+    accountId: t.account_id,
+    date: t.date,
+    amountMinor: t.amount_minor,
+    recurringPaymentId: t.recurring_payment_id,
+  }))
+  const coverage = new Map<string, string>()
+  for (const t of actuals) {
+    if (!coverage.has(t.accountId) || t.date > coverage.get(t.accountId)!)
+      coverage.set(t.accountId, t.date)
+  }
+
+  const r = reconcilePresumptions(presumed, actuals, coverage)
+
+  const gone = [...r.matched.map((m) => m.presumedId), ...r.expired.map((p) => p.id)]
+  if (gone.length > 0) await supabase.from('transactions').delete().in('id', gone)
+  for (const m of r.matched) {
+    await recordAudit({
+      userId, recordType: 'transaction', recordId: m.presumedId, action: 'delete',
+      next: { reason: 'presumption_replaced_by_actual', actual_id: m.actualId }, undoable: false,
+    })
+  }
+  for (const p of r.expired) {
+    await recordAudit({
+      userId, recordType: 'transaction', recordId: p.id, action: 'delete',
+      next: { reason: 'presumption_expired', due_date: p.date }, undoable: false,
+    })
+    // Surface it — a bill that silently stopped going out is worth a look
+    // (cancelled? failed direct debit?). Dedupe on bill + due date.
+    if (p.recurringPaymentId) {
+      const { data: rp } = await supabase
+        .from('recurring_payments')
+        .select('name')
+        .eq('id', p.recurringPaymentId)
+        .maybeSingle()
+      const { data: dupe } = await supabase
+        .from('insights')
+        .select('id')
+        .eq('insight_type', 'bill_missed')
+        .contains('figures', { bill_id: p.recurringPaymentId, due_date: p.date })
+        .limit(1)
+      if (!dupe?.length) {
+        await supabase.from('insights').insert({
+          user_id: userId,
+          insight_type: 'bill_missed',
+          headline: `${(rp as { name: string } | null)?.name ?? 'A bill'} didn't go out`,
+          body: `It was due on ${p.date} but doesn't appear in your statement. If you cancelled it, archive the bill; if not, check the direct debit hasn't failed.`,
+          figures: { bill_id: p.recurringPaymentId, due_date: p.date, amount_minor: p.amountMinor },
+          severity: 'warning',
+          confidence: 'high',
+        })
+      }
+    }
+  }
+
+  // True up balances on every account that had presumed activity.
+  const touched = new Set(presumed.map((p) => p.accountId))
+  const remaining = r.kept
+  for (const accountId of touched) {
+    const { data: newest } = await supabase
+      .from('transactions')
+      .select('date,running_balance_minor')
+      .eq('account_id', accountId)
+      .eq('is_presumed', false)
+      .not('running_balance_minor', 'is', null)
+      .order('date', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(1)
+    const row = newest?.[0] as { date: string; running_balance_minor: number } | undefined
+    if (!row) continue // no statement truth for this account — leave the cron's arithmetic alone
+    const target = presumedAdjustedBalance(
+      row.running_balance_minor,
+      row.date,
+      remaining.filter((p) => p.accountId === accountId),
+    )
+    const { data: acct } = await supabase
+      .from('accounts')
+      .select('balance_minor')
+      .eq('id', accountId)
+      .single()
+    if (acct && (acct as { balance_minor: number }).balance_minor !== target) {
+      await updateAccountBalance(userId, accountId, target)
+    }
+  }
+  return { replaced: r.matched.length, expired: r.expired.length }
+}
+
+async function updateAccountBalance(userId: string, accountId: string, balanceMinor: number): Promise<void> {
+  const { error } = await supabase
+    .from('accounts')
+    .update({
+      balance_minor: balanceMinor,
+      balance_source: 'calculated',
+      balance_updated_at: new Date().toISOString(),
+    })
+    .eq('id', accountId)
+  if (error) return
+  await recordAudit({
+    userId, recordType: 'account', recordId: accountId, action: 'update',
+    next: { balance_minor: balanceMinor, reason: 'presumption_reconciled' }, undoable: false,
+  })
+}
+
 export async function syncDebtLinks(userId: string): Promise<number> {
   const { data: rps } = await supabase
     .from('recurring_payments')
@@ -806,6 +1000,7 @@ export async function syncDebtLinks(userId: string): Promise<number> {
     .select('id,date,amount_minor,recurring_payment_id')
     .is('liability_id', null)
     .not('recurring_payment_id', 'is', null)
+    .eq('is_presumed', false) // debts move on real money only
     .lt('amount_minor', 0)
   const candidates = (unlinked ?? []).filter((t) => map.has(t.recurring_payment_id as string))
   let linked = 0

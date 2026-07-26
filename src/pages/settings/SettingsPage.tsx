@@ -268,6 +268,21 @@ export default function SettingsPage() {
             </p>
           </div>
           <div className="col-span-2">
+            <Label>Process expected bills automatically</Label>
+            <Select
+              value={(profile.auto_post_bills as boolean | undefined) === false ? 'off' : 'on'}
+              onChange={(e) => saveProfile.mutate({ auto_post_bills: e.target.value === 'on' })}
+            >
+              <option value="on">On — post each bill on its due date</option>
+              <option value="off">Off — wait for statements</option>
+            </Select>
+            <p className="mt-1 text-[11px] text-ink-faint">
+              When on, each bill is charged against your balance on its due date as an
+              &ldquo;expected&rdquo; transaction — like an estimated meter reading. Statement uploads
+              replace estimates with actuals and true the balances up automatically.
+            </p>
+          </div>
+          <div className="col-span-2">
             <Label>Uploaded documents after extraction</Label>
             <Select
               value={profile.document_retention as string}

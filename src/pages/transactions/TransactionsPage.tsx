@@ -478,6 +478,7 @@ export default function TransactionsPage() {
                   Keep both — not duplicates
                 </span>
               )}
+              {t.is_presumed && <Badge tone="warn">expected</Badge>}
               {t.is_transfer && <Badge>transfer</Badge>}
               {t.project_id && projectName(t.project_id) && (
                 <Badge tone="accent">{projectName(t.project_id)}</Badge>
@@ -567,6 +568,8 @@ function TxnDialog({
         // Project spend is one-off by definition — it must not feed the
         // "typical month" baseline. Clearing the project leaves the flag as-is.
         ...(form.project_id && !txn?.project_id ? { is_one_off: true } : {}),
+        // Saving an expected charge confirms it as real
+        ...(txn?.is_presumed ? { is_presumed: false } : {}),
       }
       let id = txn?.id
       if (id) await updateTransaction(userId, id, payload)
@@ -608,6 +611,13 @@ function TxnDialog({
           save.mutate()
         }}
       >
+        {txn?.is_presumed && (
+          <p className="rounded-lg bg-warn/10 px-3 py-2 text-xs text-warn">
+            This is an expected charge, posted automatically on its due date. Your
+            next statement upload will replace it with the real payment (or remove
+            it if the bill never went out). Saving any change confirms it as real.
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div>
             <Label>Account</Label>

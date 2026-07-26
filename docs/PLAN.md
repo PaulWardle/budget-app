@@ -68,6 +68,10 @@ All money = bigint minor units. All private tables: `user_id` + RLS (= auth.uid(
       calendar-month fallback, AI answers framed around the next payday
 - [x] **P4 Ritual & foresight** — payday plan (allocate the period's money on
       day one), ledger-driven bill price-rise detection, AI project/goal tools
+- [x] **P5 Self-correction** — presumed bill postings (pg_cron posts each bill
+      on its due date, balances stay live between imports), statement
+      reconciliation (actuals replace estimates, no-shows flagged, balances
+      true up), bill relinking on every import
 
 ## Deliberate v1 decisions (simplest reliable option, documented)
 
