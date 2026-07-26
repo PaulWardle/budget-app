@@ -1,7 +1,7 @@
 import { Spinner } from '@/components/ui/primitives'
 import { useAuth } from '@/context/AuthContext'
 import { logAppError } from '@/lib/api'
-import { lazy, Suspense, useEffect } from 'react'
+import React, { lazy, Suspense, useEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import AppLayout from './components/layout/AppLayout'
 import LoginPage from './pages/auth/LoginPage'
@@ -54,6 +54,36 @@ function Loading() {
   )
 }
 
+/**
+ * A crash inside any page must never leave a silent white screen — show what
+ * went wrong and offer a reload. The message also lands in the error log via
+ * the window 'error' listener below.
+ */
+class PageErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-3 p-6 text-center">
+        <p className="text-sm font-semibold">Something went wrong on this page</p>
+        <p className="max-w-md break-words text-xs text-ink-muted">{this.state.error.message}</p>
+        <button
+          className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white"
+          onClick={() => window.location.reload()}
+        >
+          Reload
+        </button>
+      </div>
+    )
+  }
+}
+
 export default function App() {
   const { session, loading } = useAuth()
   const userId = session?.user.id
@@ -82,8 +112,9 @@ export default function App() {
   if (loading) return <Loading />
   if (!session) return <LoginPage />
   return (
-    <Suspense fallback={<Loading />}>
-      <Routes>
+    <PageErrorBoundary>
+      <Suspense fallback={<Loading />}>
+        <Routes>
         <Route element={<AppLayout />}>
           <Route index element={<HomePage />} />
           <Route path="/transactions" element={<TransactionsPage />} />
@@ -103,7 +134,8 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
-      </Routes>
-    </Suspense>
+        </Routes>
+      </Suspense>
+    </PageErrorBoundary>
   )
 }
